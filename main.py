@@ -12,8 +12,14 @@ import random
 import webbrowser
 from pathlib import Path
 
-from geo import great_circle_km, initial_bearing_deg, random_position
-from globe import build_globe
+from geo import (
+    elevation_angle_deg,
+    great_circle_km,
+    initial_bearing_deg,
+    random_position,
+    slant_range_km,
+)
+from globe import build_globe, write_globe
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +53,14 @@ def parse_args() -> argparse.Namespace:
         help="constrain sampling to a longitude band",
     )
     parser.add_argument(
+        "--alt-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        default=(0.0, 15000.0),
+        help="altitude band to sample, in metres MSL (default: 0 15000)",
+    )
+    parser.add_argument(
         "--no-open",
         action="store_true",
         help="write the file without opening a browser",
@@ -58,21 +72,21 @@ def main() -> None:
     args = parse_args()
     rng = random.Random(args.seed)
 
-    hostile = random_position(rng, tuple(args.lat_range), tuple(args.lon_range))
-    friendly = random_position(rng, tuple(args.lat_range), tuple(args.lon_range))
+    ranges = (tuple(args.lat_range), tuple(args.lon_range), tuple(args.alt_range))
+    hostile = random_position(rng, *ranges)
+    friendly = random_position(rng, *ranges)
 
-    separation = great_circle_km(hostile, friendly)
-    bearing = initial_bearing_deg(friendly, hostile)
-
-    print(f"  RED  (hostile)  {hostile}")
-    print(f"  BLUE (friendly) {friendly}")
-    print(f"  separation      {separation:,.1f} km")
-    print(f"  bearing to RED  {bearing:.1f}° true")
+    print(f"  RED  (hostile)   {hostile}")
+    print(f"  BLUE (friendly)  {friendly}")
+    print(f"  ground range     {great_circle_km(hostile, friendly):,.1f} km")
+    print(f"  slant range      {slant_range_km(hostile, friendly):,.1f} km")
+    print(f"  bearing to RED   {initial_bearing_deg(friendly, hostile):.1f}° true")
+    print(f"  elevation to RED {elevation_angle_deg(friendly, hostile):+.2f}°")
     if args.seed is not None:
-        print(f"  seed            {args.seed}")
+        print(f"  seed             {args.seed}")
 
     output = args.output.resolve()
-    build_globe(hostile, friendly).write_html(str(output), include_plotlyjs=True)
+    write_globe(build_globe(hostile, friendly), output)
     print(f"\n  globe written to {output}")
 
     if not args.no_open:
