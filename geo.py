@@ -29,13 +29,15 @@ class Position:
     def alt_ft(self) -> float:
         return self.alt_m / METRES_PER_FOOT
 
-    def __str__(self) -> str:
+    @property
+    def coords(self) -> str:
+        """Latitude/longitude alone — for ground features, where altitude is noise."""
         ns = "N" if self.lat >= 0 else "S"
         ew = "E" if self.lon >= 0 else "W"
-        return (
-            f"{abs(self.lat):.4f}°{ns}, {abs(self.lon):.4f}°{ew}"
-            f"  @ {self.alt_m:,.0f} m ({self.alt_ft:,.0f} ft)"
-        )
+        return f"{abs(self.lat):.4f}°{ns}, {abs(self.lon):.4f}°{ew}"
+
+    def __str__(self) -> str:
+        return f"{self.coords}  @ {self.alt_m:,.0f} m ({self.alt_ft:,.0f} ft)"
 
     def to_unit_vector(self) -> tuple[float, float, float]:
         """Cartesian unit vector on the sphere — direction only, altitude ignored."""
@@ -100,6 +102,38 @@ def great_circle_km(a: Position, b: Position) -> float:
     # spherical law of cosines loses precision.
     h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(h))
+
+
+def destination(origin: Position, bearing_deg: float, distance_km: float) -> Position:
+    """Walk `distance_km` from `origin` along `bearing_deg`, staying on the sphere.
+
+    The direct geodesic problem. Altitude is carried over from the origin.
+    """
+    ang = distance_km / EARTH_RADIUS_KM
+    lat1, lon1 = math.radians(origin.lat), math.radians(origin.lon)
+    theta = math.radians(bearing_deg)
+
+    lat2 = math.asin(
+        math.sin(lat1) * math.cos(ang) + math.cos(lat1) * math.sin(ang) * math.cos(theta)
+    )
+    lon2 = lon1 + math.atan2(
+        math.sin(theta) * math.sin(ang) * math.cos(lat1),
+        math.cos(ang) - math.sin(lat1) * math.sin(lat2),
+    )
+    # Normalise into [-180, 180] so the renderer does not draw a seam.
+    lon2 = (math.degrees(lon2) + 540.0) % 360.0 - 180.0
+    return Position(math.degrees(lat2), lon2, origin.alt_m)
+
+
+def circle_path(center: Position, radius_km: float, segments: int = 96) -> list[Position]:
+    """Points forming a circle of constant surface radius around `center`.
+
+    A true circle on the sphere, not a circle in projected space — so it
+    stretches correctly toward the poles.
+    """
+    return [
+        destination(center, 360.0 * i / segments, radius_km) for i in range(segments + 1)
+    ]
 
 
 def slant_range_km(a: Position, b: Position) -> float:

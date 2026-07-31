@@ -12,6 +12,8 @@ import random
 import webbrowser
 from pathlib import Path
 
+from defenses import engaging, random_defenses
+from env import Scenario
 from geo import (
     elevation_angle_deg,
     great_circle_km,
@@ -20,6 +22,7 @@ from geo import (
     slant_range_km,
 )
 from globe import build_globe, write_globe
+from plan import load_and_plan
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,11 +64,65 @@ def parse_args() -> argparse.Namespace:
         help="altitude band to sample, in metres MSL (default: 0 15000)",
     )
     parser.add_argument(
+        "--defenses",
+        type=int,
+        default=5,
+        metavar="N",
+        help="number of enemy air-defence sites around RED (default: 5, 0 for none)",
+    )
+    parser.add_argument(
+        "--defense-spread",
+        type=float,
+        default=400.0,
+        metavar="KM",
+        help="radius around RED within which sites are scattered (default: 400)",
+    )
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="route BLUE onto RED with the trained PPO policy",
+    )
+    parser.add_argument(
+        "--policy",
+        type=Path,
+        default=Path("policy.pt"),
+        help="policy checkpoint used by --plan (default: policy.pt)",
+    )
+    parser.add_argument(
         "--no-open",
         action="store_true",
         help="write the file without opening a browser",
     )
     return parser.parse_args()
+
+
+def build_plan(args, hostile, friendly, sites):
+    """Route BLUE onto RED with the trained policy, and print the briefing."""
+    if not args.policy.exists():
+        print(f"\n  no policy at {args.policy} — run `python3 train.py` first")
+        return None
+
+    scenario = Scenario(
+        target=hostile,
+        start=friendly,
+        start_heading=initial_bearing_deg(friendly, hostile),
+        defenses=sites,
+    )
+    mission = load_and_plan(args.policy, scenario)
+
+    print(f"\n  mission plan: {mission.summary()}")
+    if mission.threatening_site:
+        gap = mission.closest_margin_km
+        edge = "inside" if gap < 0 else "clear of"
+        print(f"  closest approach {abs(gap):,.1f} km {edge} {mission.threatening_site}")
+
+    print(f"\n  {'wp':>3}  {'position':<26} {'alt':>9}  {'hdg':>5}  {'T+':>7}")
+    for i, wp in enumerate(mission.waypoints, 1):
+        print(
+            f"  {i:>3}  {wp.position.coords:<26} {wp.position.alt_m:>7,.0f} m"
+            f"  {wp.heading:>4.0f}°  {wp.elapsed_min:>5,.0f} min"
+        )
+    return mission
 
 
 def main() -> None:
@@ -85,8 +142,26 @@ def main() -> None:
     if args.seed is not None:
         print(f"  seed             {args.seed}")
 
+    sites = random_defenses(hostile, rng, args.defenses, args.defense_spread)
+    if sites:
+        print(f"\n  enemy air defence ({len(sites)} sites within "
+              f"{args.defense_spread:,.0f} km of RED)")
+        for site in sites:
+            print(f"    {site}")
+
+        threats = engaging(sites, friendly)
+        if threats:
+            names = ", ".join(s.designator for s in threats)
+            print(f"\n  BLUE is inside the envelope of: {names}")
+        else:
+            print("\n  BLUE is outside every engagement envelope")
+
+    mission = None
+    if args.plan:
+        mission = build_plan(args, hostile, friendly, sites)
+
     output = args.output.resolve()
-    write_globe(build_globe(hostile, friendly), output)
+    write_globe(build_globe(hostile, friendly, sites, mission), output)
     print(f"\n  globe written to {output}")
 
     if not args.no_open:

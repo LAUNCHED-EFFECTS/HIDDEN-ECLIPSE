@@ -6,8 +6,10 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 
+from defenses import DefenseSite
 from geo import (
     Position,
+    circle_path,
     elevation_angle_deg,
     great_circle_km,
     great_circle_path,
@@ -21,6 +23,17 @@ from geo import (
 HOSTILE_COLOR = "#e66767"
 FRIENDLY_COLOR = "#3987e5"
 ARC_COLOR = "#8a8a82"
+
+# Defence rings share the hostile hue but sit well back from it in weight, so
+# the target marker still reads as the brightest thing on the map.
+THREAT_LINE = "#b8524f"
+THREAT_FILL = "rgba(230, 103, 103, 0.10)"
+
+# Green on success, amber on failure — so the outcome is legible from the map
+# alone, not only from the title. Green also keeps the route distinct from
+# BLUE's own marker, which the old blue route sat right on top of.
+ROUTE_COLOR = "#3ecf75"
+ROUTE_FAILED_COLOR = "#eda100"
 
 OCEAN = "#12161c"
 LAND = "#242a33"
@@ -56,13 +69,99 @@ def _marker_trace(pos: Position, name: str, color: str, symbol: str) -> go.Scatt
     )
 
 
+def _threat_ring(site: DefenseSite) -> go.Scattergeo:
+    """A filled circle at the site's engagement radius."""
+    ring = circle_path(site.position, site.kind.engagement_km)
+    return go.Scattergeo(
+        lat=[p.lat for p in ring],
+        lon=[p.lon for p in ring],
+        mode="lines",
+        line=dict(width=1, color=THREAT_LINE),
+        fill="toself",
+        fillcolor=THREAT_FILL,
+        legendgroup="defenses",
+        showlegend=False,
+        hoverinfo="skip",  # the site marker carries the detail
+    )
+
+
+def _defense_marker_trace(sites: list[DefenseSite]) -> go.Scattergeo:
+    """One trace for every site, so the legend gets a single entry."""
+    return go.Scattergeo(
+        lat=[s.position.lat for s in sites],
+        lon=[s.position.lon for s in sites],
+        name=f"Air defence · {len(sites)} sites",
+        mode="markers",
+        marker=dict(
+            size=9,
+            color=THREAT_LINE,
+            symbol="x-thin",
+            line=dict(width=2, color=THREAT_LINE),
+        ),
+        legendgroup="defenses",
+        customdata=[
+            [s.designator, s.kind.name, s.kind.engagement_km, s.kind.ceiling_m]
+            for s in sites
+        ],
+        hovertemplate=(
+            "<b>%{customdata[0]}</b> · %{customdata[1]}<br>"
+            "%{lat:.4f}°, %{lon:.4f}°<br>"
+            "engagement %{customdata[2]:,.0f} km · ceiling %{customdata[3]:,.0f} m"
+            "<extra></extra>"
+        ),
+    )
+
+
+def _route_traces(plan) -> list[go.Scattergeo]:
+    """The flown route plus its waypoints, as two traces."""
+    track = plan.track
+    ok = plan.succeeded
+    return [
+        go.Scattergeo(
+            lat=[p.lat for p in track],
+            lon=[p.lon for p in track],
+            name=f"Planned route · {plan.route_km:,.0f} km",
+            mode="lines",
+            line=dict(width=2.5, color=ROUTE_COLOR if ok else ROUTE_FAILED_COLOR),
+            legendgroup="route",
+            hoverinfo="skip",
+        ),
+        go.Scattergeo(
+            lat=[w.position.lat for w in plan.waypoints],
+            lon=[w.position.lon for w in plan.waypoints],
+            name=f"Waypoints · {len(plan.waypoints)}",
+            mode="markers",
+            marker=dict(
+                size=6,
+                color=ROUTE_COLOR if ok else ROUTE_FAILED_COLOR,
+                symbol="circle",
+                line=dict(width=1, color=SURFACE),
+            ),
+            legendgroup="route",
+            customdata=[
+                [i + 1, w.position.alt_m, w.heading, w.elapsed_min]
+                for i, w in enumerate(plan.waypoints)
+            ],
+            hovertemplate=(
+                "<b>WP %{customdata[0]}</b><br>"
+                "%{lat:.4f}°, %{lon:.4f}°<br>"
+                "%{customdata[1]:,.0f} m · heading %{customdata[2]:03.0f}°<br>"
+                "T+%{customdata[3]:,.0f} min"
+                "<extra></extra>"
+            ),
+        ),
+    ]
+
+
 def build_globe(
     hostile: Position,
     friendly: Position,
+    defenses: list[DefenseSite] | None = None,
+    plan=None,
     hostile_name: str = "RED",
     friendly_name: str = "BLUE",
 ) -> go.Figure:
-    """Build the globe figure with both positions and the arc between them."""
+    """Build the globe figure with both positions, the arc, defences and route."""
     ground_range = great_circle_km(hostile, friendly)
     slant = slant_range_km(hostile, friendly)
     bearing = initial_bearing_deg(friendly, hostile)
@@ -86,6 +185,16 @@ def build_globe(
             visible="legendonly",
         )
     )
+    # Rings first, then site markers, then the two principals — so nothing
+    # important ends up underneath a threat envelope.
+    for site in defenses or []:
+        fig.add_trace(_threat_ring(site))
+    if defenses:
+        fig.add_trace(_defense_marker_trace(defenses))
+    if plan is not None:
+        for trace in _route_traces(plan):
+            fig.add_trace(trace)
+
     fig.add_trace(_marker_trace(hostile, hostile_name, HOSTILE_COLOR, "diamond"))
     fig.add_trace(_marker_trace(friendly, friendly_name, FRIENDLY_COLOR, "circle"))
 
@@ -123,7 +232,8 @@ def build_globe(
                 f"{friendly_name} → {hostile_name}<br>"
                 f"{slant:,.0f} km slant · {ground_range:,.0f} km ground<br>"
                 f"bearing {bearing:03.0f}° true · elevation {elevation:+.2f}°"
-                "</span>"
+                + (f"<br>{plan.summary()}" if plan is not None else "")
+                + "</span>"
             ),
             font=dict(size=20, color=TEXT_PRIMARY),
             x=0.03,
@@ -267,13 +377,141 @@ FIT_SCRIPT = """
 """ % GLOBE_WIDTH_FILL
 
 
-def write_globe(fig: go.Figure, path: Path) -> None:
-    """Write the figure to a standalone, full-window HTML page."""
+CONTROL_STYLE = f"""
+<style>
+  #mission-controls {{
+    position: fixed;
+    top: 18px;
+    right: 20px;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }}
+  #mission-controls button {{
+    padding: 9px 16px;
+    border-radius: 6px;
+    border: 1px solid {ROUTE_COLOR};
+    background: rgba(62, 207, 117, 0.12);
+    color: {ROUTE_COLOR};
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }}
+  #mission-controls button:hover:not(:disabled) {{
+    background: rgba(62, 207, 117, 0.22);
+  }}
+  #mission-controls button:disabled {{
+    opacity: 0.5;
+    cursor: progress;
+  }}
+  #mission-controls #new-scenario {{
+    border-color: {TEXT_SECONDARY};
+    background: rgba(166, 173, 184, 0.10);
+    color: {TEXT_SECONDARY};
+    font-weight: 500;
+  }}
+  #mission-status {{
+    max-width: 320px;
+    text-align: right;
+    color: {TEXT_SECONDARY};
+  }}
+</style>
+"""
+
+CONTROL_HTML = """
+<div id="mission-controls">
+  <button id="plan-mission">Plan mission</button>
+  <button id="new-scenario">New scenario</button>
+  <div id="mission-status"></div>
+</div>
+"""
+
+# The button posts to the server, which runs the actual PPO policy and returns
+# ready-made traces. Inference stays in one place — the Python that was
+# trained and evaluated — rather than being reimplemented here.
+CONTROL_SCRIPT = """
+(function () {
+    var gd = document.getElementById('{plot_id}');
+    var planBtn = document.getElementById('plan-mission');
+    var newBtn = document.getElementById('new-scenario');
+    var status = document.getElementById('mission-status');
+    if (!gd || !planBtn) { return; }
+
+    var routeIndices = [];
+
+    planBtn.addEventListener('click', function () {
+        planBtn.disabled = true;
+        status.textContent = 'running policy…';
+
+        fetch('/plan', {method: 'POST'})
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.error) { status.textContent = data.error; return; }
+
+                // Drop any previous route so repeated clicks do not stack up.
+                var drop = routeIndices.length
+                    ? Plotly.deleteTraces(gd, routeIndices)
+                    : Promise.resolve();
+                return drop.then(function () {
+                    var first = gd.data.length;
+                    routeIndices = data.traces.map(function (_, i) { return first + i; });
+                    return Plotly.addTraces(gd, data.traces);
+                }).then(function () {
+                    status.textContent = data.summary;
+                });
+            })
+            .catch(function (err) {
+                status.textContent = 'plan failed: ' + err.message;
+            })
+            .finally(function () { planBtn.disabled = false; });
+    });
+
+    newBtn.addEventListener('click', function () {
+        newBtn.disabled = true;
+        status.textContent = 'generating…';
+        fetch('/scenario', {method: 'POST'})
+            .then(function () { window.location.reload(); })
+            .catch(function (err) {
+                status.textContent = 'failed: ' + err.message;
+                newBtn.disabled = false;
+            });
+    });
+})();
+"""
+
+
+def render_html(fig: go.Figure, interactive: bool = False) -> str:
+    """Full-window HTML for the figure.
+
+    `interactive` adds the mission-control buttons, which only work when the
+    page is served by serve.py — a static file has no endpoint to call.
+    """
+    scripts = [HOVER_SCRIPT, FIT_SCRIPT]
+    head = PAGE_STYLE
+    if interactive:
+        scripts.append(CONTROL_SCRIPT)
+        head += CONTROL_STYLE
+
     html = fig.to_html(
         include_plotlyjs=True,
         full_html=True,
-        post_script=[HOVER_SCRIPT, FIT_SCRIPT],
+        post_script=scripts,
         config=GLOBE_CONFIG,
     )
-    html = html.replace("</head>", f"{PAGE_STYLE}</head>", 1)
-    Path(path).write_text(html, encoding="utf-8")
+    html = html.replace("</head>", f"{head}</head>", 1)
+    if interactive:
+        html = html.replace("<body>", f"<body>{CONTROL_HTML}", 1)
+    return html
+
+
+def write_globe(fig: go.Figure, path: Path) -> None:
+    """Write the figure to a standalone, full-window HTML page."""
+    Path(path).write_text(render_html(fig), encoding="utf-8")
+
+
+def route_traces_json(plan) -> list[dict]:
+    """Route traces as plain dicts, for the server to hand to Plotly.addTraces."""
+    return [t.to_plotly_json() for t in _route_traces(plan)]
