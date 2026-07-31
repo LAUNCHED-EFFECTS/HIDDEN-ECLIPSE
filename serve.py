@@ -19,7 +19,14 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from globe import build_globe, render_html, route_traces_json
+from geo import Position, great_circle_km
+from globe import (
+    build_globe,
+    ground_track_update,
+    render_html,
+    route_traces_json,
+    title_text,
+)
 from plan import plan_mission
 from ppo import load_policy
 from world import World, generate_world
@@ -50,8 +57,8 @@ class MissionState:
             tuple(a.lat_range),
             tuple(a.lon_range),
             tuple(a.alt_range),
-            a.defenses,
-            a.defense_spread,
+            a.defences,
+            a.defence_spread,
         )
 
     def new_scenario(self) -> None:
@@ -61,8 +68,25 @@ class MissionState:
     def page(self) -> str:
         with self.lock:
             world = self.world
-        fig = build_globe(world.hostile, world.friendly, world.defenses)
+        fig = build_globe(world.hostile, world.friendly, world.defences)
         return render_html(fig, interactive=True)
+
+    def move_blue(self, lat: float, lon: float) -> dict:
+        """Reposition BLUE after a drag, keeping its altitude."""
+        with self.lock:
+            old = self.world.friendly
+            self.world.friendly = Position(float(lat), float(lon), old.alt_m)
+            world = self.world
+
+        return {
+            "title": title_text(world.hostile, world.friendly),
+            "groundTrack": ground_track_update(world.hostile, world.friendly),
+            "summary": (
+                f"BLUE at {world.friendly.coords} · "
+                f"{great_circle_km(world.friendly, world.hostile):,.0f} km to RED"
+                " — plan again"
+            ),
+        }
 
     def plan(self) -> dict:
         if self.model is None:
@@ -110,6 +134,18 @@ def make_handler(state: MissionState):
             elif self.path == "/scenario":
                 state.new_scenario()
                 payload = {"ok": True}
+            elif self.path == "/blue":
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                    payload = state.move_blue(body["lat"], body["lon"])
+                except (ValueError, KeyError, TypeError) as exc:
+                    self._send(
+                        json.dumps({"error": f"bad request: {exc}"}).encode(),
+                        "application/json",
+                        400,
+                    )
+                    return
             else:
                 self._send(b"not found", "text/plain", 404)
                 return
@@ -131,8 +167,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lat-range", type=float, nargs=2, default=(-90.0, 90.0))
     parser.add_argument("--lon-range", type=float, nargs=2, default=(-180.0, 180.0))
     parser.add_argument("--alt-range", type=float, nargs=2, default=(0.0, 15000.0))
-    parser.add_argument("--defenses", type=int, default=5)
-    parser.add_argument("--defense-spread", type=float, default=400.0)
+    parser.add_argument("--defences", type=int, default=5)
+    parser.add_argument("--defence-spread", type=float, default=400.0)
     parser.add_argument("--no-open", action="store_true")
     return parser.parse_args()
 

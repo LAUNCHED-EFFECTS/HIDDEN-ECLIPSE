@@ -6,7 +6,7 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 
-from defenses import DefenseSite
+from defences import DefenceSite
 from geo import (
     Position,
     circle_path,
@@ -19,10 +19,10 @@ from geo import (
 )
 
 # Identity is carried by shape and label as well as hue, so the picture still
-# reads without color: hostile is a red diamond, friendly a blue circle.
-HOSTILE_COLOR = "#e66767"
-FRIENDLY_COLOR = "#3987e5"
-ARC_COLOR = "#8a8a82"
+# reads without colour: hostile is a red diamond, friendly a blue circle.
+HOSTILE_COLOUR = "#e66767"
+FRIENDLY_COLOUR = "#3987e5"
+ARC_COLOUR = "#8a8a82"
 
 # Defence rings share the hostile hue but sit well back from it in weight, so
 # the target marker still reads as the brightest thing on the map.
@@ -32,8 +32,8 @@ THREAT_FILL = "rgba(230, 103, 103, 0.10)"
 # Green on success, amber on failure — so the outcome is legible from the map
 # alone, not only from the title. Green also keeps the route distinct from
 # BLUE's own marker, which the old blue route sat right on top of.
-ROUTE_COLOR = "#3ecf75"
-ROUTE_FAILED_COLOR = "#eda100"
+ROUTE_COLOUR = "#3ecf75"
+ROUTE_FAILED_COLOUR = "#eda100"
 
 OCEAN = "#12161c"
 LAND = "#242a33"
@@ -43,7 +43,7 @@ TEXT_PRIMARY = "#f0f2f5"
 TEXT_SECONDARY = "#a6adb8"
 
 
-def _marker_trace(pos: Position, name: str, color: str, symbol: str) -> go.Scattergeo:
+def _marker_trace(pos: Position, name: str, colour: str, symbol: str) -> go.Scattergeo:
     return go.Scattergeo(
         lat=[pos.lat],
         lon=[pos.lon],
@@ -51,7 +51,8 @@ def _marker_trace(pos: Position, name: str, color: str, symbol: str) -> go.Scatt
         mode="markers+text",
         marker=dict(
             size=14,
-            color=color,
+            # `color` is plotly's own keyword, so it keeps the US spelling here.
+            color=colour,
             symbol=symbol,
             # 2px surface ring keeps the mark legible against land or ocean.
             line=dict(width=2, color=SURFACE),
@@ -69,7 +70,7 @@ def _marker_trace(pos: Position, name: str, color: str, symbol: str) -> go.Scatt
     )
 
 
-def _threat_ring(site: DefenseSite) -> go.Scattergeo:
+def _threat_ring(site: DefenceSite) -> go.Scattergeo:
     """A filled circle at the site's engagement radius."""
     ring = circle_path(site.position, site.kind.engagement_km)
     return go.Scattergeo(
@@ -79,13 +80,13 @@ def _threat_ring(site: DefenseSite) -> go.Scattergeo:
         line=dict(width=1, color=THREAT_LINE),
         fill="toself",
         fillcolor=THREAT_FILL,
-        legendgroup="defenses",
+        legendgroup="defences",
         showlegend=False,
         hoverinfo="skip",  # the site marker carries the detail
     )
 
 
-def _defense_marker_trace(sites: list[DefenseSite]) -> go.Scattergeo:
+def _defence_marker_trace(sites: list[DefenceSite]) -> go.Scattergeo:
     """One trace for every site, so the legend gets a single entry."""
     return go.Scattergeo(
         lat=[s.position.lat for s in sites],
@@ -98,7 +99,7 @@ def _defense_marker_trace(sites: list[DefenseSite]) -> go.Scattergeo:
             symbol="x-thin",
             line=dict(width=2, color=THREAT_LINE),
         ),
-        legendgroup="defenses",
+        legendgroup="defences",
         customdata=[
             [s.designator, s.kind.name, s.kind.engagement_km, s.kind.ceiling_m]
             for s in sites
@@ -122,7 +123,7 @@ def _route_traces(plan) -> list[go.Scattergeo]:
             lon=[p.lon for p in track],
             name=f"Planned route · {plan.route_km:,.0f} km",
             mode="lines",
-            line=dict(width=2.5, color=ROUTE_COLOR if ok else ROUTE_FAILED_COLOR),
+            line=dict(width=2.5, color=ROUTE_COLOUR if ok else ROUTE_FAILED_COLOUR),
             legendgroup="route",
             hoverinfo="skip",
         ),
@@ -133,7 +134,7 @@ def _route_traces(plan) -> list[go.Scattergeo]:
             mode="markers",
             marker=dict(
                 size=6,
-                color=ROUTE_COLOR if ok else ROUTE_FAILED_COLOR,
+                color=ROUTE_COLOUR if ok else ROUTE_FAILED_COLOUR,
                 symbol="circle",
                 line=dict(width=1, color=SURFACE),
             ),
@@ -153,57 +154,103 @@ def _route_traces(plan) -> list[go.Scattergeo]:
     ]
 
 
+def _ground_track_name(hostile: Position, friendly: Position) -> str:
+    return f"Ground track · {great_circle_km(hostile, friendly):,.0f} km"
+
+
+def _ground_track_trace(hostile: Position, friendly: Position) -> go.Scattergeo:
+    """The dotted great-circle arc between the two principals.
+
+    Hidden until a marker is hovered (see HOVER_SCRIPT). "legendonly" rather
+    than False so the legend still names it and carries the range.
+    """
+    arc = great_circle_path(friendly, hostile)
+    return go.Scattergeo(
+        lat=[p.lat for p in arc],
+        lon=[p.lon for p in arc],
+        name=_ground_track_name(hostile, friendly),
+        mode="lines",
+        line=dict(width=2, color=ARC_COLOUR, dash="dot"),
+        hoverinfo="skip",
+        visible="legendonly",
+    )
+
+
+def ground_track_update(hostile: Position, friendly: Position) -> dict:
+    """The arc as plain data, for redrawing it after BLUE has been dragged.
+
+    Recomputed here rather than in the browser so there is one implementation
+    of the great-circle interpolation.
+    """
+    arc = great_circle_path(friendly, hostile)
+    return {
+        "lat": [p.lat for p in arc],
+        "lon": [p.lon for p in arc],
+        "name": _ground_track_name(hostile, friendly),
+    }
+
+
+def title_text(
+    hostile: Position,
+    friendly: Position,
+    plan=None,
+    hostile_name: str = "RED",
+    friendly_name: str = "BLUE",
+) -> str:
+    """The title block. Split out so the server can refresh it after a drag.
+
+    Plotly does not wrap title text — a single long line runs past the paper's
+    right edge and is clipped — so the readout is broken across explicit lines
+    rather than left to fit.
+    """
+    return (
+        "Tactical picture<br>"
+        f"<span style='font-size:13px;color:{TEXT_SECONDARY}'>"
+        f"{friendly_name} → {hostile_name}<br>"
+        f"{slant_range_km(hostile, friendly):,.0f} km slant · "
+        f"{great_circle_km(hostile, friendly):,.0f} km ground<br>"
+        f"bearing {initial_bearing_deg(friendly, hostile):03.0f}° true · "
+        f"elevation {elevation_angle_deg(friendly, hostile):+.2f}°"
+        + (f"<br>{plan.summary()}" if plan is not None else "")
+        + "</span>"
+    )
+
+
 def build_globe(
     hostile: Position,
     friendly: Position,
-    defenses: list[DefenseSite] | None = None,
+    defences: list[DefenceSite] | None = None,
     plan=None,
     hostile_name: str = "RED",
     friendly_name: str = "BLUE",
 ) -> go.Figure:
     """Build the globe figure with both positions, the arc, defences and route."""
-    ground_range = great_circle_km(hostile, friendly)
-    slant = slant_range_km(hostile, friendly)
-    bearing = initial_bearing_deg(friendly, hostile)
-    elevation = elevation_angle_deg(friendly, hostile)
-    center = midpoint(hostile, friendly)
-    arc = great_circle_path(friendly, hostile)
+    centre = midpoint(hostile, friendly)
 
     fig = go.Figure()
 
-    # Trace 0 — the ground track. Added first so the markers sit on top of it,
-    # and hidden until a marker is hovered (see HOVER_SCRIPT). "legendonly"
-    # rather than False so the legend still names it and carries the range.
-    fig.add_trace(
-        go.Scattergeo(
-            lat=[p.lat for p in arc],
-            lon=[p.lon for p in arc],
-            name=f"Ground track · {ground_range:,.0f} km",
-            mode="lines",
-            line=dict(width=2, color=ARC_COLOR, dash="dot"),
-            hoverinfo="skip",
-            visible="legendonly",
-        )
-    )
+    # Trace 0, so the markers sit on top of it — and so ARC_TRACE_INDEX and the
+    # drag handler's lookup both stay valid.
+    fig.add_trace(_ground_track_trace(hostile, friendly))
     # Rings first, then site markers, then the two principals — so nothing
     # important ends up underneath a threat envelope.
-    for site in defenses or []:
+    for site in defences or []:
         fig.add_trace(_threat_ring(site))
-    if defenses:
-        fig.add_trace(_defense_marker_trace(defenses))
+    if defences:
+        fig.add_trace(_defence_marker_trace(defences))
     if plan is not None:
         for trace in _route_traces(plan):
             fig.add_trace(trace)
 
-    fig.add_trace(_marker_trace(hostile, hostile_name, HOSTILE_COLOR, "diamond"))
-    fig.add_trace(_marker_trace(friendly, friendly_name, FRIENDLY_COLOR, "circle"))
+    fig.add_trace(_marker_trace(hostile, hostile_name, HOSTILE_COLOUR, "diamond"))
+    fig.add_trace(_marker_trace(friendly, friendly_name, FRIENDLY_COLOUR, "circle"))
 
     fig.update_geos(
         projection=dict(
             type="orthographic",
             # Aim the camera at the midpoint so both marks face the viewer
             # whenever they are on the same hemisphere.
-            rotation=dict(lat=center.lat, lon=center.lon, roll=0),
+            rotation=dict(lat=centre.lat, lon=centre.lon, roll=0),
         ),
         showland=True,
         landcolor=LAND,
@@ -223,18 +270,7 @@ def build_globe(
 
     fig.update_layout(
         title=dict(
-            # Plotly does not wrap title text — a single long line runs past
-            # the paper's right edge and is clipped — so the readout is broken
-            # across explicit lines rather than left to fit.
-            text=(
-                "Tactical picture<br>"
-                f"<span style='font-size:13px;color:{TEXT_SECONDARY}'>"
-                f"{friendly_name} → {hostile_name}<br>"
-                f"{slant:,.0f} km slant · {ground_range:,.0f} km ground<br>"
-                f"bearing {bearing:03.0f}° true · elevation {elevation:+.2f}°"
-                + (f"<br>{plan.summary()}" if plan is not None else "")
-                + "</span>"
-            ),
+            text=title_text(hostile, friendly, plan, hostile_name, friendly_name),
             font=dict(size=20, color=TEXT_PRIMARY),
             x=0.03,
             y=0.95,
@@ -381,7 +417,9 @@ CONTROL_STYLE = f"""
 <style>
   #mission-controls {{
     position: fixed;
-    top: 18px;
+    /* Clear of plotly's modebar, which is right-aligned at the top of the
+       plot area — at 18px the buttons sat underneath it. */
+    top: 64px;
     right: 20px;
     z-index: 10;
     display: flex;
@@ -393,9 +431,9 @@ CONTROL_STYLE = f"""
   #mission-controls button {{
     padding: 9px 16px;
     border-radius: 6px;
-    border: 1px solid {ROUTE_COLOR};
+    border: 1px solid {ROUTE_COLOUR};
     background: rgba(62, 207, 117, 0.12);
-    color: {ROUTE_COLOR};
+    color: {ROUTE_COLOUR};
     font: inherit;
     font-weight: 600;
     cursor: pointer;
@@ -479,6 +517,169 @@ CONTROL_SCRIPT = """
                 newBtn.disabled = false;
             });
     });
+
+    // ---- drag BLUE to reposition it -------------------------------------
+    //
+    // The projection maps lon/lat to *paper* coordinates — plotly's own geo
+    // code inverts with `[x + xaxis._offset, y + yaxis._offset]`, i.e. relative
+    // to the plot origin, so client coords convert by subtracting the div's
+    // top-left. A calibration offset is measured on mousedown anyway, since
+    // that press is known to be on the marker: if the assumption above is ever
+    // off by a constant, this cancels it out for the rest of the drag.
+    var HIT_RADIUS = 18;
+    var dragging = false;
+    var calibration = [0, 0];
+
+    function subplot() {
+        var fl = gd._fullLayout;
+        return fl && fl.geo && fl.geo._subplot;
+    }
+
+    function blueIndex() {
+        for (var i = 0; i < gd.data.length; i++) {
+            if (gd.data[i].name === 'BLUE') { return i; }
+        }
+        return -1;
+    }
+
+    function toScreen(lon, lat) {
+        var sp = subplot();
+        if (!sp || !sp.projection) { return null; }
+        var p = sp.projection([lon, lat]);
+        if (!p) { return null; }                  // on the far side of the globe
+        var r = gd.getBoundingClientRect();
+        return [p[0] + r.left, p[1] + r.top];
+    }
+
+    function toLonLat(clientX, clientY) {
+        var sp = subplot();
+        if (!sp || !sp.projection) { return null; }
+        var r = gd.getBoundingClientRect();
+        return sp.projection.invert([
+            clientX - r.left - calibration[0],
+            clientY - r.top - calibration[1],
+        ]);
+    }
+
+    function onMarker(ev, idx) {
+        // DOM test first — exact, and independent of any coordinate maths.
+        var groups = gd.querySelectorAll('.trace.scattergeo');
+        if (groups.length === gd.data.length && groups[idx] &&
+            groups[idx].contains(ev.target)) {
+            return 'dom';
+        }
+        var screen = toScreen(gd.data[idx].lon[0], gd.data[idx].lat[0]);
+        if (!screen) { return null; }
+        var dx = ev.clientX - screen[0], dy = ev.clientY - screen[1];
+        return Math.sqrt(dx * dx + dy * dy) <= HIT_RADIUS ? 'geometric' : null;
+    }
+
+    // Capture phase: this has to beat the globe's own rotate-drag handler,
+    // which is bound to a descendant of gd.
+    gd.addEventListener('mousedown', function (ev) {
+        var idx = blueIndex();
+        if (idx < 0) { return; }
+
+        var hit = onMarker(ev, idx);
+        if (!hit) { return; }
+
+        calibration = [0, 0];
+        var screen = toScreen(gd.data[idx].lon[0], gd.data[idx].lat[0]);
+        if (hit === 'dom' && screen) {
+            calibration = [ev.clientX - screen[0], ev.clientY - screen[1]];
+        }
+
+        dragging = true;
+        gd.style.cursor = 'grabbing';
+        status.textContent = 'moving BLUE…';
+        ev.preventDefault();
+        ev.stopPropagation();
+    }, true);
+
+    // Each restyle redraws the geo layer, so coalesce to one per frame instead
+    // of one per mousemove event.
+    var queued = null;
+
+    function flush() {
+        queued = null;
+        if (!dragging || !pending) { return; }
+        var idx = blueIndex();
+        if (idx >= 0) {
+            Plotly.restyle(gd, {lon: [[pending[0]]], lat: [[pending[1]]]}, [idx]);
+        }
+    }
+
+    var pending = null;
+
+    window.addEventListener('mousemove', function (ev) {
+        if (!dragging) { return; }
+        var lonlat = toLonLat(ev.clientX, ev.clientY);
+        // invert() returns null past the limb of the globe — hold the last
+        // good position rather than snapping somewhere arbitrary.
+        if (!lonlat) { return; }
+        pending = lonlat;
+        if (queued === null) { queued = window.requestAnimationFrame(flush); }
+        ev.preventDefault();
+    }, true);
+
+    window.addEventListener('mouseup', function (ev) {
+        if (!dragging) { return; }
+        dragging = false;
+        gd.style.cursor = '';
+
+        var idx = blueIndex();
+        if (idx < 0) { return; }
+
+        // A frame may still be queued; apply it so the committed position is
+        // where the cursor actually was, not one frame behind.
+        if (queued !== null) { window.cancelAnimationFrame(queued); queued = null; }
+        if (pending) {
+            Plotly.restyle(gd, {lon: [[pending[0]]], lat: [[pending[1]]]}, [idx]);
+        }
+        var lat = pending ? pending[1] : gd.data[idx].lat[0];
+        var lon = pending ? pending[0] : gd.data[idx].lon[0];
+        pending = null;
+
+        // Any existing route was flown from the old start point.
+        var drop = routeIndices.length
+            ? Plotly.deleteTraces(gd, routeIndices)
+            : Promise.resolve();
+        routeIndices = [];
+
+        drop.then(function () {
+            return fetch('/blue', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({lat: lat, lon: lon}),
+            });
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (data.title) { Plotly.relayout(gd, {'title.text': data.title}); }
+
+            // The arc ran from where BLUE used to be; the server sends back a
+            // recomputed one, along with a legend label carrying the new range.
+            if (data.groundTrack) {
+                var gi = -1;
+                for (var i = 0; i < gd.data.length; i++) {
+                    if ((gd.data[i].name || '').indexOf('Ground track') === 0) {
+                        gi = i;
+                        break;
+                    }
+                }
+                if (gi >= 0) {
+                    Plotly.restyle(gd, {
+                        lat: [data.groundTrack.lat],
+                        lon: [data.groundTrack.lon],
+                        name: [data.groundTrack.name],
+                    }, [gi]);
+                }
+            }
+
+            status.textContent = data.summary || 'BLUE moved — plan again';
+        })
+        .catch(function (err) { status.textContent = 'move failed: ' + err.message; });
+    }, true);
 })();
 """
 

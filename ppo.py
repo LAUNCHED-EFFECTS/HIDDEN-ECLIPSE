@@ -172,7 +172,7 @@ class PPOTrainer:
         self.device = torch.device(config.device)
         self.envs = VecEnv(config.num_envs, seed=config.seed)
         self.model = ActorCritic(hidden=config.hidden).to(self.device)
-        self.optimizer = torch.optim.Adam(
+        self.optimiser = torch.optim.Adam(
             self.model.parameters(), lr=config.learning_rate, eps=1e-5
         )
         self.obs_norm = RunningNorm(OBS_DIM)
@@ -193,7 +193,7 @@ class PPOTrainer:
         for it in range(1, iterations + 1):
             # Linear learning-rate decay, standard for PPO stability late on.
             frac = 1.0 - (it - 1) / iterations
-            for group in self.optimizer.param_groups:
+            for group in self.optimiser.param_groups:
                 group["lr"] = frac * cfg.learning_rate
 
             obs_buf = np.zeros((cfg.rollout_steps, cfg.num_envs, OBS_DIM), dtype=np.float32)
@@ -291,10 +291,10 @@ class PPOTrainer:
                     - cfg.entropy_coef * entropy_loss
                 )
 
-                self.optimizer.zero_grad()
+                self.optimiser.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.model.parameters(), cfg.max_grad_norm)
-                self.optimizer.step()
+                self.optimiser.step()
 
                 losses["policy"].append(policy_loss.item())
                 losses["value"].append(value_loss.item())

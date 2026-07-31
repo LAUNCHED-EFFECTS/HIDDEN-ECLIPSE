@@ -125,14 +125,14 @@ def destination(origin: Position, bearing_deg: float, distance_km: float) -> Pos
     return Position(math.degrees(lat2), lon2, origin.alt_m)
 
 
-def circle_path(center: Position, radius_km: float, segments: int = 96) -> list[Position]:
-    """Points forming a circle of constant surface radius around `center`.
+def circle_path(centre: Position, radius_km: float, segments: int = 96) -> list[Position]:
+    """Points forming a circle of constant surface radius around `centre`.
 
     A true circle on the sphere, not a circle in projected space — so it
     stretches correctly toward the poles.
     """
     return [
-        destination(center, 360.0 * i / segments, radius_km) for i in range(segments + 1)
+        destination(centre, 360.0 * i / segments, radius_km) for i in range(segments + 1)
     ]
 
 

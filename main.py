@@ -12,7 +12,7 @@ import random
 import webbrowser
 from pathlib import Path
 
-from defenses import engaging, random_defenses
+from defences import engaging, random_defences
 from env import Scenario
 from geo import (
     elevation_angle_deg,
@@ -64,14 +64,14 @@ def parse_args() -> argparse.Namespace:
         help="altitude band to sample, in metres MSL (default: 0 15000)",
     )
     parser.add_argument(
-        "--defenses",
+        "--defences",
         type=int,
         default=5,
         metavar="N",
         help="number of enemy air-defence sites around RED (default: 5, 0 for none)",
     )
     parser.add_argument(
-        "--defense-spread",
+        "--defence-spread",
         type=float,
         default=400.0,
         metavar="KM",
@@ -106,7 +106,7 @@ def build_plan(args, hostile, friendly, sites):
         target=hostile,
         start=friendly,
         start_heading=initial_bearing_deg(friendly, hostile),
-        defenses=sites,
+        defences=sites,
     )
     mission = load_and_plan(args.policy, scenario)
 
@@ -142,10 +142,10 @@ def main() -> None:
     if args.seed is not None:
         print(f"  seed             {args.seed}")
 
-    sites = random_defenses(hostile, rng, args.defenses, args.defense_spread)
+    sites = random_defences(hostile, rng, args.defences, args.defence_spread)
     if sites:
         print(f"\n  enemy air defence ({len(sites)} sites within "
-              f"{args.defense_spread:,.0f} km of RED)")
+              f"{args.defence_spread:,.0f} km of RED)")
         for site in sites:
             print(f"    {site}")
 

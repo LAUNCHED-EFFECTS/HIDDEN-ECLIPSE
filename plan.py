@@ -6,10 +6,9 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import torch
 
-from defenses import DefenseSite
+from defences import DefenceSite
 from env import STEP_SECONDS, MissionEnv, Scenario
 from geo import Position, great_circle_km, initial_bearing_deg
 from ppo import ActorCritic, RunningNorm
@@ -51,7 +50,7 @@ class MissionPlan:
         )
 
 
-def _closest_margin(track: list[Position], sites: list[DefenseSite]) -> tuple[float, str | None]:
+def _closest_margin(track: list[Position], sites: list[DefenceSite]) -> tuple[float, str | None]:
     """Smallest gap between the route and any live engagement envelope.
 
     Negative means the route entered one. Sites the aircraft was flying above
@@ -113,7 +112,7 @@ def plan_mission(
 
     track = env.track
     route_km = sum(great_circle_km(a, b) for a, b in zip(track, track[1:]))
-    margin, culprit = _closest_margin(track, scenario.defenses)
+    margin, culprit = _closest_margin(track, scenario.defences)
 
     return MissionPlan(
         outcome=info["outcome"],

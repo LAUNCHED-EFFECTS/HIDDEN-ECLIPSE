@@ -14,7 +14,7 @@ from geo import Position, destination, slant_range_km
 
 
 @dataclass(frozen=True)
-class DefenseType:
+class DefenceType:
     """A class of air-defence site."""
 
     name: str
@@ -26,20 +26,20 @@ class DefenseType:
 
 # Long-range sites are rarer than point defence, so the laydown skews toward the
 # short end rather than picking uniformly.
-DEFENSE_TYPES = (
-    DefenseType("Long-range SAM", "LR", engagement_km=250.0, ceiling_m=25000.0, weight=1.0),
-    DefenseType("Medium-range SAM", "MR", engagement_km=90.0, ceiling_m=18000.0, weight=2.0),
-    DefenseType("Short-range SAM", "SR", engagement_km=35.0, ceiling_m=10000.0, weight=3.0),
-    DefenseType("Point defence", "PD", engagement_km=12.0, ceiling_m=4500.0, weight=3.0),
+DEFENCE_TYPES = (
+    DefenceType("Long-range SAM", "LR", engagement_km=250.0, ceiling_m=25000.0, weight=1.0),
+    DefenceType("Medium-range SAM", "MR", engagement_km=90.0, ceiling_m=18000.0, weight=2.0),
+    DefenceType("Short-range SAM", "SR", engagement_km=35.0, ceiling_m=10000.0, weight=3.0),
+    DefenceType("Point defence", "PD", engagement_km=12.0, ceiling_m=4500.0, weight=3.0),
 )
 
 
 @dataclass(frozen=True)
-class DefenseSite:
+class DefenceSite:
     """A placed air-defence site."""
 
     designator: str
-    kind: DefenseType
+    kind: DefenceType
     position: Position
 
     def engages(self, target: Position) -> bool:
@@ -60,12 +60,12 @@ class DefenseSite:
         )
 
 
-def random_defenses(
+def random_defences(
     target: Position,
     rng: random.Random | None = None,
     count: int = 5,
     spread_km: float = 400.0,
-) -> list[DefenseSite]:
+) -> list[DefenceSite]:
     """Scatter `count` sites around `target`, within `spread_km` of it.
 
     Sites are placed on the ground (altitude 0) and distributed uniformly by
@@ -73,7 +73,7 @@ def random_defenses(
     the centre, since a ring's area grows with its radius.
     """
     rng = rng or random
-    kinds = list(DEFENSE_TYPES)
+    kinds = list(DEFENCE_TYPES)
     weights = [k.weight for k in kinds]
     counters: dict[str, int] = {}
     sites = []
@@ -86,7 +86,7 @@ def random_defenses(
         at = destination(target, bearing, radius)
         counters[kind.code] = counters.get(kind.code, 0) + 1
         sites.append(
-            DefenseSite(
+            DefenceSite(
                 designator=f"{kind.code}-{counters[kind.code]:02d}",
                 kind=kind,
                 position=Position(at.lat, at.lon, 0.0),
@@ -95,6 +95,6 @@ def random_defenses(
     return sites
 
 
-def engaging(sites: list[DefenseSite], target: Position) -> list[DefenseSite]:
+def engaging(sites: list[DefenceSite], target: Position) -> list[DefenceSite]:
     """The subset of `sites` whose envelope currently covers `target`."""
     return [s for s in sites if s.engages(target)]

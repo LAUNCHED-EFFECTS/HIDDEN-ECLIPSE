@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from defenses import DefenseSite, random_defenses
+from defences import DefenceSite, random_defences
 from geo import Position, destination, great_circle_km, initial_bearing_deg
 
 # --- airframe and episode limits -------------------------------------------
@@ -48,8 +48,8 @@ PRESSURE_MARGIN_KM = 50.0  # how far outside a ring the agent starts feeling it
 
 # --- scenario randomisation -------------------------------------------------
 START_RANGE_KM = (600.0, 1200.0)
-DEFENSE_COUNT = (3, 8)
-DEFENSE_SPREAD_KM = (150.0, 400.0)
+DEFENCE_COUNT = (3, 8)
+DEFENCE_SPREAD_KM = (150.0, 400.0)
 # Poles are excluded: bearing maths is fine there, but the scenarios are
 # degenerate and it keeps the training distribution closer to the useful case.
 TARGET_LAT_LIMIT = 60.0
@@ -62,10 +62,10 @@ class Scenario:
     target: Position
     start: Position
     start_heading: float
-    defenses: list[DefenseSite]
+    defences: list[DefenceSite]
 
 
-def sealing_sites(target: Position, sites: list[DefenseSite]) -> list[DefenseSite]:
+def sealing_sites(target: Position, sites: list[DefenceSite]) -> list[DefenceSite]:
     """Sites that make the target unreachable, not merely well defended.
 
     A site whose ceiling is above the airframe's cannot be overflown, so if its
@@ -96,11 +96,11 @@ def random_scenario(rng: random.Random, max_attempts: int = 12) -> Scenario:
         alt_m=0.0,
     )
     for _ in range(max_attempts):
-        sites = random_defenses(
+        sites = random_defences(
             target,
             rng,
-            count=rng.randint(*DEFENSE_COUNT),
-            spread_km=rng.uniform(*DEFENSE_SPREAD_KM),
+            count=rng.randint(*DEFENCE_COUNT),
+            spread_km=rng.uniform(*DEFENCE_SPREAD_KM),
         )
         if not sealing_sites(target, sites):
             break
@@ -157,7 +157,7 @@ class MissionEnv:
         # a purely terminal penalty gives no gradient until it is too late.
         reward += R_PRESSURE * min(self._threat_pressure(), PRESSURE_CAP)
 
-        engaged = [s for s in self.scenario.defenses if s.engages(self.position)]
+        engaged = [s for s in self.scenario.defences if s.engages(self.position)]
         if engaged:
             return self._observe(), reward + R_KILLED, True, {
                 "outcome": "shot_down",
@@ -189,7 +189,7 @@ class MissionEnv:
         which is what makes climbing a genuine alternative to turning.
         """
         total = 0.0
-        for site in self.scenario.defenses:
+        for site in self.scenario.defences:
             if self.position.alt_m > site.kind.ceiling_m:
                 continue
             reach = site.kind.engagement_km + PRESSURE_MARGIN_KM
@@ -201,7 +201,7 @@ class MissionEnv:
     def _threat_features(self) -> list[float]:
         """Nearest sites, ordered by how little margin is left to their edge."""
         rows = []
-        for site in self.scenario.defenses:
+        for site in self.scenario.defences:
             d = great_circle_km(self.position, site.position)
             rows.append((d - site.kind.engagement_km, d, site))
         rows.sort(key=lambda r: r[0])
