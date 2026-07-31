@@ -23,13 +23,14 @@ from geo import Position, great_circle_km
 from globe import (
     build_globe,
     ground_track_update,
+    marker_hovertemplate,
     render_html,
     route_traces_json,
     title_text,
 )
 from plan import plan_mission
 from ppo import load_policy
-from world import World, generate_world
+from world import World, clean_callsign, generate_world
 
 
 class MissionState:
@@ -59,17 +60,56 @@ class MissionState:
             tuple(a.alt_range),
             a.defences,
             a.defence_spread,
+            a.blue_number,
+            a.blue_callsign,
         )
 
     def new_scenario(self) -> None:
         with self.lock:
+            # The callsign belongs to the asset, not the scenario — a fresh
+            # laydown should not silently rename what the user just named.
+            number, callsign = self.world.friendly_number, self.world.friendly_callsign
             self.world = self._generate()
+            self.world.friendly_number = number
+            self.world.friendly_callsign = callsign
 
     def page(self) -> str:
         with self.lock:
             world = self.world
-        fig = build_globe(world.hostile, world.friendly, world.defences)
-        return render_html(fig, interactive=True)
+        fig = build_globe(
+            world.hostile,
+            world.friendly,
+            world.defences,
+            friendly_name=world.friendly_label,
+        )
+        return render_html(
+            fig,
+            interactive=True,
+            blue_number=world.friendly_number,
+            blue_callsign=world.friendly_callsign,
+        )
+
+    def set_callsign(self, number, callsign) -> dict:
+        """Renumber or rename the friendly asset."""
+        try:
+            number = max(1, int(number))
+        except (TypeError, ValueError):
+            return {"error": "asset number must be a whole number"}
+
+        with self.lock:
+            self.world.friendly_number = number
+            self.world.friendly_callsign = clean_callsign(callsign)
+            world = self.world
+
+        label = world.friendly_label
+        return {
+            "label": label,
+            "number": world.friendly_number,
+            "callsign": world.friendly_callsign,
+            "hovertemplate": marker_hovertemplate(label),
+            "title": title_text(world.hostile, world.friendly, friendly_name=label),
+            "summary": f"renamed to {label}",
+        }
 
     def move_blue(self, lat: float, lon: float) -> dict:
         """Reposition BLUE after a drag, keeping its altitude."""
@@ -79,10 +119,12 @@ class MissionState:
             world = self.world
 
         return {
-            "title": title_text(world.hostile, world.friendly),
+            "title": title_text(
+                world.hostile, world.friendly, friendly_name=world.friendly_label
+            ),
             "groundTrack": ground_track_update(world.hostile, world.friendly),
             "summary": (
-                f"BLUE at {world.friendly.coords} · "
+                f"{world.friendly_label} at {world.friendly.coords} · "
                 f"{great_circle_km(world.friendly, world.hostile):,.0f} km to RED"
                 " — plan again"
             ),
@@ -94,8 +136,9 @@ class MissionState:
 
         with self.lock:
             scenario = self.world.to_scenario()
+            label = self.world.friendly_label
 
-        mission = plan_mission(scenario, self.model, self.norm)
+        mission = plan_mission(scenario, self.model, self.norm, asset_label=label)
         payload = {
             "summary": mission.summary(),
             "succeeded": mission.succeeded,
@@ -134,11 +177,16 @@ def make_handler(state: MissionState):
             elif self.path == "/scenario":
                 state.new_scenario()
                 payload = {"ok": True}
-            elif self.path == "/blue":
+            elif self.path in ("/blue", "/callsign"):
                 try:
                     length = int(self.headers.get("Content-Length", 0))
                     body = json.loads(self.rfile.read(length) or b"{}")
-                    payload = state.move_blue(body["lat"], body["lon"])
+                    if self.path == "/blue":
+                        payload = state.move_blue(body["lat"], body["lon"])
+                    else:
+                        payload = state.set_callsign(
+                            body.get("number", 1), body.get("callsign", "")
+                        )
                 except (ValueError, KeyError, TypeError) as exc:
                     self._send(
                         json.dumps({"error": f"bad request: {exc}"}).encode(),
@@ -169,6 +217,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alt-range", type=float, nargs=2, default=(0.0, 15000.0))
     parser.add_argument("--defences", type=int, default=5)
     parser.add_argument("--defence-spread", type=float, default=400.0)
+    parser.add_argument("--blue-number", type=int, default=1)
+    parser.add_argument("--blue-callsign", default="")
     parser.add_argument("--no-open", action="store_true")
     return parser.parse_args()
 

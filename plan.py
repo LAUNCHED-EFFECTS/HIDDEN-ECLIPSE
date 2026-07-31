@@ -33,6 +33,7 @@ class MissionPlan:
     duration_min: float
     closest_margin_km: float
     threatening_site: str | None
+    asset_label: str = "BLUE"
 
     @property
     def succeeded(self) -> bool:
@@ -41,7 +42,7 @@ class MissionPlan:
     def summary(self) -> str:
         verdict = {
             "target_destroyed": "target destroyed",
-            "shot_down": "BLUE lost to air defence",
+            "shot_down": f"{self.asset_label} lost to air defence",
             "out_of_fuel": "aborted — out of fuel",
         }.get(self.outcome, self.outcome)
         return (
@@ -98,6 +99,7 @@ def plan_mission(
     model: ActorCritic,
     norm: RunningNorm,
     seed: int = 0,
+    asset_label: str = "BLUE",
 ) -> MissionPlan:
     """Fly the deterministic policy through `scenario` and package the result."""
     env = MissionEnv(random.Random(seed))
@@ -122,11 +124,17 @@ def plan_mission(
         duration_min=(len(track) - 1) * STEP_SECONDS / 60.0,
         closest_margin_km=margin,
         threatening_site=culprit,
+        asset_label=asset_label,
     )
 
 
-def load_and_plan(policy_path: Path, scenario: Scenario, seed: int = 0) -> MissionPlan:
+def load_and_plan(
+    policy_path: Path,
+    scenario: Scenario,
+    seed: int = 0,
+    asset_label: str = "BLUE",
+) -> MissionPlan:
     from ppo import load_policy
 
     model, norm = load_policy(policy_path)
-    return plan_mission(scenario, model, norm, seed)
+    return plan_mission(scenario, model, norm, seed, asset_label)

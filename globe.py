@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from html import escape as html_escape
 from pathlib import Path
 
 import plotly.graph_objects as go
@@ -43,6 +44,20 @@ TEXT_PRIMARY = "#f0f2f5"
 TEXT_SECONDARY = "#a6adb8"
 
 
+def marker_hovertemplate(name: str) -> str:
+    """Hover text for a principal's marker.
+
+    The name is baked into the template, so renaming an asset has to restyle
+    this too — hence it being shared rather than inlined.
+    """
+    return (
+        f"<b>{name}</b><br>"
+        "%{lat:.4f}°, %{lon:.4f}°<br>"
+        "altitude %{customdata[0]:,.0f} m (%{customdata[1]:,.0f} ft)"
+        "<extra></extra>"
+    )
+
+
 def _marker_trace(pos: Position, name: str, colour: str, symbol: str) -> go.Scattergeo:
     return go.Scattergeo(
         lat=[pos.lat],
@@ -61,12 +76,7 @@ def _marker_trace(pos: Position, name: str, colour: str, symbol: str) -> go.Scat
         textposition="top center",
         textfont=dict(size=12, color=TEXT_PRIMARY),
         customdata=[[pos.alt_m, pos.alt_ft]],
-        hovertemplate=(
-            f"<b>{name}</b><br>"
-            "%{lat:.4f}°, %{lon:.4f}°<br>"
-            "altitude %{customdata[0]:,.0f} m (%{customdata[1]:,.0f} ft)"
-            "<extra></extra>"
-        ),
+        hovertemplate=marker_hovertemplate(name),
     )
 
 
@@ -451,6 +461,32 @@ CONTROL_STYLE = f"""
     color: {TEXT_SECONDARY};
     font-weight: 500;
   }}
+  #callsign-row {{
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: {TEXT_SECONDARY};
+  }}
+  #callsign-row input {{
+    padding: 6px 8px;
+    border-radius: 5px;
+    border: 1px solid #39414d;
+    background: rgba(255, 255, 255, 0.04);
+    color: {TEXT_PRIMARY};
+    font: inherit;
+  }}
+  #blue-number {{ width: 56px; }}
+  #blue-callsign {{ width: 130px; }}
+  #callsign-row button {{
+    padding: 6px 12px;
+    border-color: {FRIENDLY_COLOUR};
+    background: rgba(57, 135, 229, 0.12);
+    color: {FRIENDLY_COLOUR};
+    font-weight: 500;
+  }}
+  #callsign-row button:hover:not(:disabled) {{
+    background: rgba(57, 135, 229, 0.22);
+  }}
   #mission-status {{
     max-width: 320px;
     text-align: right;
@@ -459,10 +495,20 @@ CONTROL_STYLE = f"""
 </style>
 """
 
-CONTROL_HTML = """
+def control_html(blue_number: int = 1, blue_callsign: str = "") -> str:
+    """Mission controls, pre-filled with the asset's current callsign."""
+    callsign = html_escape(blue_callsign or "", quote=True)
+    return f"""
 <div id="mission-controls">
   <button id="plan-mission">Plan mission</button>
   <button id="new-scenario">New scenario</button>
+  <div id="callsign-row">
+    <label for="blue-number">BLUE</label>
+    <input id="blue-number" type="number" min="1" step="1" value="{int(blue_number)}">
+    <input id="blue-callsign" type="text" placeholder="callsign" value="{callsign}"
+           maxlength="24">
+    <button id="apply-callsign">Rename</button>
+  </div>
   <div id="mission-status"></div>
 </div>
 """
@@ -518,6 +564,52 @@ CONTROL_SCRIPT = """
             });
     });
 
+    // ---- rename the friendly asset ---------------------------------------
+    var applyBtn = document.getElementById('apply-callsign');
+    var numberInput = document.getElementById('blue-number');
+    var callsignInput = document.getElementById('blue-callsign');
+
+    function applyCallsign() {
+        applyBtn.disabled = true;
+        fetch('/callsign', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                number: parseInt(numberInput.value, 10),
+                callsign: callsignInput.value,
+            }),
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (data.error) { status.textContent = data.error; return; }
+            var idx = blueIndex();
+            if (idx >= 0) {
+                // name drives the legend, text the on-map label, and the
+                // hovertemplate has the name baked in — all three move together.
+                Plotly.restyle(gd, {
+                    name: [data.label],
+                    text: [[data.label]],
+                    hovertemplate: [data.hovertemplate],
+                }, [idx]);
+            }
+            if (data.title) { Plotly.relayout(gd, {'title.text': data.title}); }
+            numberInput.value = data.number;
+            callsignInput.value = data.callsign;
+            status.textContent = data.summary;
+        })
+        .catch(function (err) { status.textContent = 'rename failed: ' + err.message; })
+        .finally(function () { applyBtn.disabled = false; });
+    }
+
+    if (applyBtn) {
+        applyBtn.addEventListener('click', applyCallsign);
+        [numberInput, callsignInput].forEach(function (el) {
+            el.addEventListener('keydown', function (ev) {
+                if (ev.key === 'Enter') { applyCallsign(); }
+            });
+        });
+    }
+
     // ---- drag BLUE to reposition it -------------------------------------
     //
     // The projection maps lon/lat to *paper* coordinates — plotly's own geo
@@ -535,9 +627,11 @@ CONTROL_SCRIPT = """
         return fl && fl.geo && fl.geo._subplot;
     }
 
+    // Prefix match, not equality: the trace is named "BLUE 2 (Viper)" once a
+    // callsign is set, and an exact test would silently stop finding it.
     function blueIndex() {
         for (var i = 0; i < gd.data.length; i++) {
-            if (gd.data[i].name === 'BLUE') { return i; }
+            if ((gd.data[i].name || '').indexOf('BLUE') === 0) { return i; }
         }
         return -1;
     }
@@ -684,7 +778,12 @@ CONTROL_SCRIPT = """
 """
 
 
-def render_html(fig: go.Figure, interactive: bool = False) -> str:
+def render_html(
+    fig: go.Figure,
+    interactive: bool = False,
+    blue_number: int = 1,
+    blue_callsign: str = "",
+) -> str:
     """Full-window HTML for the figure.
 
     `interactive` adds the mission-control buttons, which only work when the
@@ -704,7 +803,9 @@ def render_html(fig: go.Figure, interactive: bool = False) -> str:
     )
     html = html.replace("</head>", f"{head}</head>", 1)
     if interactive:
-        html = html.replace("<body>", f"<body>{CONTROL_HTML}", 1)
+        html = html.replace(
+            "<body>", f"<body>{control_html(blue_number, blue_callsign)}", 1
+        )
     return html
 
 

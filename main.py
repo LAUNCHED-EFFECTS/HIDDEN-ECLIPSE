@@ -12,16 +12,16 @@ import random
 import webbrowser
 from pathlib import Path
 
-from defences import engaging, random_defences
+from defences import engaging
 from env import Scenario
 from geo import (
     elevation_angle_deg,
     great_circle_km,
     initial_bearing_deg,
-    random_position,
     slant_range_km,
 )
 from globe import build_globe, write_globe
+from world import generate_world
 from plan import load_and_plan
 
 
@@ -78,6 +78,19 @@ def parse_args() -> argparse.Namespace:
         help="radius around RED within which sites are scattered (default: 400)",
     )
     parser.add_argument(
+        "--blue-number",
+        type=int,
+        default=1,
+        metavar="N",
+        help="asset number shown as 'BLUE N' (default: 1)",
+    )
+    parser.add_argument(
+        "--blue-callsign",
+        default="",
+        metavar="NAME",
+        help="optional callsign, rendered as 'BLUE N (NAME)'",
+    )
+    parser.add_argument(
         "--plan",
         action="store_true",
         help="route BLUE onto RED with the trained PPO policy",
@@ -96,8 +109,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_plan(args, hostile, friendly, sites):
-    """Route BLUE onto RED with the trained policy, and print the briefing."""
+def build_plan(args, hostile, friendly, sites, label="BLUE"):
+    """Route the friendly asset onto RED, and print the briefing."""
     if not args.policy.exists():
         print(f"\n  no policy at {args.policy} — run `python3 train.py` first")
         return None
@@ -108,7 +121,7 @@ def build_plan(args, hostile, friendly, sites):
         start_heading=initial_bearing_deg(friendly, hostile),
         defences=sites,
     )
-    mission = load_and_plan(args.policy, scenario)
+    mission = load_and_plan(args.policy, scenario, asset_label=label)
 
     print(f"\n  mission plan: {mission.summary()}")
     if mission.threatening_site:
@@ -129,12 +142,23 @@ def main() -> None:
     args = parse_args()
     rng = random.Random(args.seed)
 
-    ranges = (tuple(args.lat_range), tuple(args.lon_range), tuple(args.alt_range))
-    hostile = random_position(rng, *ranges)
-    friendly = random_position(rng, *ranges)
+    world = generate_world(
+        rng,
+        tuple(args.lat_range),
+        tuple(args.lon_range),
+        tuple(args.alt_range),
+        args.defences,
+        args.defence_spread,
+        args.blue_number,
+        args.blue_callsign,
+    )
+    hostile, friendly, sites = world.hostile, world.friendly, world.defences
+    label = world.friendly_label
 
-    print(f"  RED  (hostile)   {hostile}")
-    print(f"  BLUE (friendly)  {friendly}")
+    # Width follows the label, which grows with the callsign.
+    width = max(len(label), len("RED")) + 2
+    print(f"  {'RED':<{width}} {hostile}")
+    print(f"  {label:<{width}} {friendly}")
     print(f"  ground range     {great_circle_km(hostile, friendly):,.1f} km")
     print(f"  slant range      {slant_range_km(hostile, friendly):,.1f} km")
     print(f"  bearing to RED   {initial_bearing_deg(friendly, hostile):.1f}° true")
@@ -142,7 +166,6 @@ def main() -> None:
     if args.seed is not None:
         print(f"  seed             {args.seed}")
 
-    sites = random_defences(hostile, rng, args.defences, args.defence_spread)
     if sites:
         print(f"\n  enemy air defence ({len(sites)} sites within "
               f"{args.defence_spread:,.0f} km of RED)")
@@ -152,16 +175,18 @@ def main() -> None:
         threats = engaging(sites, friendly)
         if threats:
             names = ", ".join(s.designator for s in threats)
-            print(f"\n  BLUE is inside the envelope of: {names}")
+            print(f"\n  {label} is inside the envelope of: {names}")
         else:
-            print("\n  BLUE is outside every engagement envelope")
+            print(f"\n  {label} is outside every engagement envelope")
 
     mission = None
     if args.plan:
-        mission = build_plan(args, hostile, friendly, sites)
+        mission = build_plan(args, hostile, friendly, sites, label)
 
     output = args.output.resolve()
-    write_globe(build_globe(hostile, friendly, sites, mission), output)
+    write_globe(
+        build_globe(hostile, friendly, sites, mission, friendly_name=label), output
+    )
     print(f"\n  globe written to {output}")
 
     if not args.no_open:
