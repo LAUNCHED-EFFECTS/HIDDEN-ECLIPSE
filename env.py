@@ -51,7 +51,12 @@ MAX_STEPS = 220                              # ~3,300 km of range
 STRIKE_RADIUS_KM = 20.0                      # close enough to release on RED
 
 # --- team -------------------------------------------------------------------
-MAX_TEAM = 4                 # slot count the policy is trained against
+# Slot count the policy is *trained* against — it fixes the rollout buffer
+# shape, so training scenarios never exceed it. It is deliberately not a limit
+# on how many aircraft an episode can fly: the policy is per-aircraft and sees
+# only its nearest TRACKED_TEAMMATES, so it applies to a package of any size.
+# MissionEnv sizes its arrays to the actual package for exactly that reason.
+MAX_TEAM = 4
 TEAM_SIZE_RANGE = (2, 4)     # assets per training scenario
 TRACKED_TEAMMATES = 3        # nearest N teammates visible to each asset
 # Arrivals needed to destroy the target, capped by team size so a one-asset
@@ -188,9 +193,11 @@ class _Asset:
 class MissionEnv:
     """One episode for a whole BLUE package. Reset/step, no gym dependency.
 
-    Observations, rewards and dones are per slot, padded to MAX_TEAM. The
-    `active` mask says which slots carry a real, still-flying asset; the
-    trainer uses it to keep padding and casualties out of the gradient.
+    Observations, rewards and dones are per slot, padded to at least MAX_TEAM
+    so training buffers keep a fixed shape — but a larger package simply gets
+    more slots rather than overflowing. The `active` mask says which slots carry
+    a real, still-flying asset; the trainer uses it to keep padding and
+    casualties out of the gradient.
     """
 
     def __init__(self, rng: random.Random | None = None):
@@ -198,6 +205,7 @@ class MissionEnv:
         self.scenario: Scenario | None = None
         self.assets: list[_Asset] = []
         self.steps = 0
+        self.slots = MAX_TEAM
         self.tracks: list[list[Position]] = []
 
     # -- episode lifecycle ---------------------------------------------------
@@ -212,6 +220,9 @@ class MissionEnv:
             )
             for start, heading in zip(self.scenario.starts, self.scenario.start_headings)
         ]
+        # At least MAX_TEAM so the training buffers keep their shape, but never
+        # fewer than the package actually has.
+        self.slots = max(MAX_TEAM, len(self.assets))
         self.steps = 0
         self.arrivals: list[int] = []
         self.tracks = [[a.position] for a in self.assets]
@@ -223,11 +234,11 @@ class MissionEnv:
         """Advance every active asset by one minute.
 
         Returns (obs, rewards, dones, info) with per-slot arrays of length
-        MAX_TEAM. `dones` marks a slot's trajectory as finished — the asset was
+        `self.slots`. `dones` marks a slot's trajectory as finished — the asset was
         lost, reached the target, or the episode ended under it.
         """
-        rewards = np.zeros(MAX_TEAM, dtype=np.float32)
-        dones = np.zeros(MAX_TEAM, dtype=np.float32)
+        rewards = np.zeros(self.slots, dtype=np.float32)
+        dones = np.zeros(self.slots, dtype=np.float32)
         was_active = [a.active for a in self.assets]
 
         self.steps += 1
@@ -504,20 +515,23 @@ class MissionEnv:
         obs += [
             len(self.arrivals_in_window()) / max(required, 1),
             self.window_remaining() / TOT_WINDOW_STEPS,
-            sum(1 for a in self.assets if a.active) / MAX_TEAM,
+            # Clamped: training only ever saw up to MAX_TEAM aircraft, so a
+            # larger package must not push this feature outside the range the
+            # policy was fitted on.
+            min(1.0, sum(1 for a in self.assets if a.active) / MAX_TEAM),
             1.0 - self.steps / MAX_STEPS,
         ]
         return obs
 
     def observe(self) -> np.ndarray:
-        obs = np.zeros((MAX_TEAM, OBS_DIM), dtype=np.float32)
+        obs = np.zeros((self.slots, OBS_DIM), dtype=np.float32)
         for i, asset in enumerate(self.assets):
             if asset.active:
                 obs[i] = np.asarray(self._observe_asset(i), dtype=np.float32)
         return obs
 
     def active_mask(self) -> np.ndarray:
-        mask = np.zeros(MAX_TEAM, dtype=np.float32)
+        mask = np.zeros(self.slots, dtype=np.float32)
         for i, asset in enumerate(self.assets):
             mask[i] = 1.0 if asset.active else 0.0
         return mask

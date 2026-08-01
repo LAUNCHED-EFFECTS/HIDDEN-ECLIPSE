@@ -212,21 +212,25 @@ def fit_scale_limit(hostile: Position, friendly: Position) -> float:
     return FIT_MARGIN / max(math.sin(theta / 2), 1e-9)
 
 
-def _ground_track_name(hostile: Position, friendly: Position) -> str:
-    return f"Ground track · {great_circle_km(hostile, friendly):,.0f} km"
+def _ground_track_name(hostile: Position, friendly: Position, label: str) -> str:
+    return f"{label} ground track · {great_circle_km(hostile, friendly):,.0f} km"
 
 
-def _ground_track_trace(hostile: Position, friendly: Position) -> go.Scattergeo:
-    """The dotted great-circle arc between the two principals.
+def _ground_track_trace(
+    hostile: Position, friendly: Position, label: str, index: int
+) -> go.Scattergeo:
+    """One aircraft's dotted great-circle arc to the target.
 
-    Hidden until a marker is hovered (see HOVER_SCRIPT). "legendonly" rather
-    than False so the legend still names it and carries the range.
+    Hidden until its marker is hovered — or until RED is, which reveals the
+    whole set (see HOVER_SCRIPT). "legendonly" rather than False so the legend
+    still names it and carries the range.
     """
     arc = great_circle_path(friendly, hostile)
     return go.Scattergeo(
         lat=[p.lat for p in arc],
         lon=[p.lon for p in arc],
-        name=_ground_track_name(hostile, friendly),
+        name=_ground_track_name(hostile, friendly, label),
+        meta={"role": "track", "asset": index},
         mode="lines",
         line=dict(width=2, color=ARC_COLOUR, dash="dot"),
         hoverinfo="skip",
@@ -234,17 +238,20 @@ def _ground_track_trace(hostile: Position, friendly: Position) -> go.Scattergeo:
     )
 
 
-def ground_track_update(hostile: Position, friendly: Position) -> dict:
-    """The arc as plain data, for redrawing it after BLUE has been dragged.
+def ground_track_update(
+    hostile: Position, friendly: Position, label: str, index: int
+) -> dict:
+    """One arc as plain data, for redrawing it after that aircraft was dragged.
 
     Recomputed here rather than in the browser so there is one implementation
     of the great-circle interpolation.
     """
     arc = great_circle_path(friendly, hostile)
     return {
+        "asset": index,
         "lat": [p.lat for p in arc],
         "lon": [p.lon for p in arc],
-        "name": _ground_track_name(hostile, friendly),
+        "name": _ground_track_name(hostile, friendly, label),
     }
 
 
@@ -302,9 +309,11 @@ def build_globe(
 
     fig = go.Figure()
 
-    # Trace 0, so the markers sit on top of it — and so ARC_TRACE_INDEX and the
-    # drag handler's lookup both stay valid.
-    fig.add_trace(_ground_track_trace(hostile, lead))
+    # Tracks first so every marker sits on top of them. One per aircraft, each
+    # tagged with its index so the hover logic can reveal exactly one — or all
+    # of them when RED is hovered.
+    for i, (position, name) in enumerate(zip(friendlies, friendly_names)):
+        fig.add_trace(_ground_track_trace(hostile, position, name, i))
     # Rings first, then site markers, then the two principals — so nothing
     # important ends up underneath a threat envelope.
     for site in defences or []:
@@ -399,40 +408,73 @@ def build_globe(
     return fig
 
 
-# Index of the ground-track trace, which HOVER_SCRIPT toggles. It is added
-# first in build_globe, so this stays 0.
-ARC_TRACE_INDEX = 0
-
 # Hover-driven visibility is not expressible in plotly's declarative API, so it
 # rides along in the exported HTML as a post-plot hook.
+#
+# Hovering an aircraft reveals that aircraft's track; hovering RED reveals every
+# track at once. Traces are found by meta.role rather than by index, because the
+# trace list changes with the package size and with whether a route is drawn.
 HOVER_SCRIPT = """
 (function () {
     var gd = document.getElementById('{plot_id}');
-    var ARC = %d;
-    var shown = false;
+    var shown = [];
     var pending = null;
 
-    function set(state) {
-        if (pending) { clearTimeout(pending); pending = null; }
-        if (shown === state) { return; }   // never restyle a no-op: each one
-        shown = state;                     // redraws the globe
-        Plotly.restyle(gd, {visible: state ? true : 'legendonly'}, [ARC]);
+    function trackTraces() {
+        var byAsset = {}, all = [];
+        for (var i = 0; i < gd.data.length; i++) {
+            var m = gd.data[i].meta;
+            if (m && m.role === 'track') { byAsset[m.asset] = i; all.push(i); }
+        }
+        return {byAsset: byAsset, all: all};
     }
 
-    gd.on('plotly_hover', function () { set(true); });
+    function sameSet(a, b) {
+        if (a.length !== b.length) { return false; }
+        for (var i = 0; i < a.length; i++) {
+            if (a[i] !== b[i]) { return false; }
+        }
+        return true;
+    }
 
-    // Deferred, so sliding the cursor straight from one marker to the other
-    // does not blink the track off between them. The redraw from set(true)
-    // can itself emit an unhover, which this delay also absorbs.
+    function set(wanted) {
+        if (pending) { clearTimeout(pending); pending = null; }
+        wanted = wanted.slice().sort(function (x, y) { return x - y; });
+        if (sameSet(wanted, shown)) { return; }   // never restyle a no-op: each
+                                                  // one redraws the globe
+
+        var hide = shown.filter(function (i) { return wanted.indexOf(i) < 0; });
+        if (hide.length) { Plotly.restyle(gd, {visible: 'legendonly'}, hide); }
+        if (wanted.length) { Plotly.restyle(gd, {visible: true}, wanted); }
+        shown = wanted;
+    }
+
+    gd.on('plotly_hover', function (ev) {
+        var point = ev && ev.points && ev.points[0];
+        if (!point) { return; }
+        var meta = gd.data[point.curveNumber] && gd.data[point.curveNumber].meta;
+        var tracks = trackTraces();
+
+        if (meta && meta.role === 'hostile') {
+            set(tracks.all);                       // everything converging on RED
+        } else if (meta && meta.role === 'asset') {
+            var one = tracks.byAsset[meta.asset];
+            set(one === undefined ? [] : [one]);
+        } else {
+            set([]);                               // defence sites, waypoints
+        }
+    });
+
+    // Deferred, so sliding the cursor straight from one marker to the next does
+    // not blink the track off between them. The redraw from set() can itself
+    // emit an unhover, which this delay also absorbs.
     gd.on('plotly_unhover', function () {
-        pending = setTimeout(function () { pending = null; set(false); }, 120);
+        pending = setTimeout(function () { pending = null; set([]); }, 120);
     });
 })();
-""" % ARC_TRACE_INDEX
+"""
 
 
-# scroll_zoom is on by default for geo, but it is stated here so that adding
-# any other config key later cannot silently drop it.
 GLOBE_CONFIG = {
     "scrollZoom": True,
     "responsive": True,
@@ -965,12 +1007,14 @@ CONTROL_SCRIPT = """
         .then(function (data) {
             if (data.title) { Plotly.relayout(gd, {'title.text': data.title}); }
 
-            // The arc ran from where BLUE used to be; the server sends back a
-            // recomputed one, along with a legend label carrying the new range.
+            // That aircraft's arc ran from where it used to be; the server
+            // sends back a recomputed one carrying the new range. Only its own
+            // track moves — the rest of the package has not.
             if (data.groundTrack) {
                 var gi = -1;
                 for (var i = 0; i < gd.data.length; i++) {
-                    if ((gd.data[i].name || '').indexOf('Ground track') === 0) {
+                    var tm = gd.data[i].meta;
+                    if (tm && tm.role === 'track' && tm.asset === data.groundTrack.asset) {
                         gi = i;
                         break;
                     }

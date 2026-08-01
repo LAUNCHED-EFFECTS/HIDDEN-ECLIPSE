@@ -3,7 +3,6 @@
 The site types are generic tiers rather than real-world systems — enough to give
 each site a distinct envelope without pretending to model anything specific.
 """
-
 from __future__ import annotations
 
 import math

@@ -161,7 +161,9 @@ class MissionState:
                 friendly_name=world.assets[0].label,
                 package_size=len(world.assets),
             ),
-            "groundTrack": ground_track_update(world.hostile, world.lead),
+            "groundTrack": ground_track_update(
+                world.hostile, asset.position, label, int(index)
+            ),
             "summary": (
                 f"{label} at {asset.position.coords} · "
                 f"{great_circle_km(asset.position, world.hostile):,.0f} km to RED"
