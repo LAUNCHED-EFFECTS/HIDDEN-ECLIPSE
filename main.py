@@ -13,7 +13,6 @@ import webbrowser
 from pathlib import Path
 
 from defences import engaging
-from env import Scenario
 from geo import (
     elevation_angle_deg,
     great_circle_km,
@@ -78,6 +77,13 @@ def parse_args() -> argparse.Namespace:
         help="radius around RED within which sites are scattered (default: 400)",
     )
     parser.add_argument(
+        "--blues",
+        type=int,
+        default=2,
+        metavar="N",
+        help="number of friendly assets in the package (default: 2)",
+    )
+    parser.add_argument(
         "--blue-number",
         type=int,
         default=1,
@@ -109,32 +115,32 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_plan(args, hostile, friendly, sites, label="BLUE"):
-    """Route the friendly asset onto RED, and print the briefing."""
+def build_plan(args, world):
+    """Route the package onto RED, and print the briefing."""
     if not args.policy.exists():
         print(f"\n  no policy at {args.policy} — run `python3 train.py` first")
         return None
 
-    scenario = Scenario(
-        target=hostile,
-        start=friendly,
-        start_heading=initial_bearing_deg(friendly, hostile),
-        defences=sites,
+    mission = load_and_plan(
+        args.policy, world.to_scenario(), labels=world.friendly_labels
     )
-    mission = load_and_plan(args.policy, scenario, asset_label=label)
-
     print(f"\n  mission plan: {mission.summary()}")
-    if mission.threatening_site:
-        gap = mission.closest_margin_km
-        edge = "inside" if gap < 0 else "clear of"
-        print(f"  closest approach {abs(gap):,.1f} km {edge} {mission.threatening_site}")
 
-    print(f"\n  {'wp':>3}  {'position':<26} {'alt':>9}  {'hdg':>5}  {'T+':>7}")
-    for i, wp in enumerate(mission.waypoints, 1):
-        print(
-            f"  {i:>3}  {wp.position.coords:<26} {wp.position.alt_m:>7,.0f} m"
-            f"  {wp.heading:>4.0f}°  {wp.elapsed_min:>5,.0f} min"
-        )
+    for asset in mission.assets:
+        print(f"\n  {asset.summary()}  ({asset.route_km:,.0f} km, "
+              f"{len(asset.waypoints)} waypoints)")
+        if asset.threatening_site:
+            gap = asset.closest_margin_km
+            edge = "inside" if gap < 0 else "clear of"
+            print(f"    closest approach {abs(gap):,.1f} km {edge} "
+                  f"{asset.threatening_site}")
+
+        print(f"    {'wp':>3}  {'position':<26} {'alt':>9}  {'hdg':>5}  {'T+':>7}")
+        for i, wp in enumerate(asset.waypoints, 1):
+            print(
+                f"    {i:>3}  {wp.position.coords:<26} {wp.position.alt_m:>7,.0f} m"
+                f"  {wp.heading:>4.0f}°  {wp.elapsed_min:>5,.0f} min"
+            )
     return mission
 
 
@@ -151,18 +157,23 @@ def main() -> None:
         args.defence_spread,
         args.blue_number,
         args.blue_callsign,
+        args.blues,
     )
-    hostile, friendly, sites = world.hostile, world.friendly, world.defences
-    label = world.friendly_label
+    hostile, sites = world.hostile, world.defences
+    friendlies, labels = world.friendlies, world.friendly_labels
 
-    # Width follows the label, which grows with the callsign.
-    width = max(len(label), len("RED")) + 2
+    # Width follows the labels, which grow with the callsign.
+    width = max([len(l) for l in labels] + [len("RED")]) + 2
     print(f"  {'RED':<{width}} {hostile}")
-    print(f"  {label:<{width}} {friendly}")
-    print(f"  ground range     {great_circle_km(hostile, friendly):,.1f} km")
-    print(f"  slant range      {slant_range_km(hostile, friendly):,.1f} km")
-    print(f"  bearing to RED   {initial_bearing_deg(friendly, hostile):.1f}° true")
-    print(f"  elevation to RED {elevation_angle_deg(friendly, hostile):+.2f}°")
+    for label, position in zip(labels, friendlies):
+        print(f"  {label:<{width}} {position}")
+
+    lead = friendlies[0]
+    print(f"\n  lead asset {labels[0]} to RED")
+    print(f"    ground range     {great_circle_km(hostile, lead):,.1f} km")
+    print(f"    slant range      {slant_range_km(hostile, lead):,.1f} km")
+    print(f"    bearing          {initial_bearing_deg(lead, hostile):.1f}° true")
+    print(f"    elevation        {elevation_angle_deg(lead, hostile):+.2f}°")
     if args.seed is not None:
         print(f"  seed             {args.seed}")
 
@@ -172,20 +183,21 @@ def main() -> None:
         for site in sites:
             print(f"    {site}")
 
-        threats = engaging(sites, friendly)
-        if threats:
-            names = ", ".join(s.designator for s in threats)
-            print(f"\n  {label} is inside the envelope of: {names}")
-        else:
-            print(f"\n  {label} is outside every engagement envelope")
+        for label, position in zip(labels, friendlies):
+            threats = engaging(sites, position)
+            if threats:
+                names = ", ".join(s.designator for s in threats)
+                print(f"\n  {label} is inside the envelope of: {names}")
+            else:
+                print(f"\n  {label} is outside every engagement envelope")
 
     mission = None
     if args.plan:
-        mission = build_plan(args, hostile, friendly, sites, label)
+        mission = build_plan(args, world)
 
     output = args.output.resolve()
     write_globe(
-        build_globe(hostile, friendly, sites, mission, friendly_name=label), output
+        build_globe(hostile, friendlies, sites, mission, friendly_names=labels), output
     )
     print(f"\n  globe written to {output}")
 

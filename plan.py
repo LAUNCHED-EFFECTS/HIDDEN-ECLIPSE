@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -25,34 +25,75 @@ class Waypoint:
 
 
 @dataclass
-class MissionPlan:
-    outcome: str
+class AssetPlan:
+    """One aircraft's leg of the package."""
+
+    label: str
+    fate: str                     # on_target | lost | returned
     track: list[Position]
     waypoints: list[Waypoint]
     route_km: float
-    duration_min: float
+    arrived_min: float | None
     closest_margin_km: float
     threatening_site: str | None
-    asset_label: str = "BLUE"
+
+    @property
+    def succeeded(self) -> bool:
+        return self.fate == "on_target"
+
+    def summary(self) -> str:
+        if self.fate == "on_target":
+            return f"{self.label}: on target at T+{self.arrived_min:,.0f} min"
+        if self.fate == "lost":
+            return f"{self.label}: lost to {self.threatening_site or 'air defence'}"
+        return f"{self.label}: did not reach the target"
+
+
+@dataclass
+class PackagePlan:
+    """The whole strike package, and how the mission came out."""
+
+    outcome: str
+    assets: list[AssetPlan] = field(default_factory=list)
+    coordination: float = 0.0
+    duration_min: float = 0.0
 
     @property
     def succeeded(self) -> bool:
         return self.outcome == "target_destroyed"
 
+    @property
+    def on_target(self) -> list[AssetPlan]:
+        return [a for a in self.assets if a.succeeded]
+
+    @property
+    def tot_spread_min(self) -> float:
+        """Minutes between the first and last arrival.
+
+        Derived from the assets rather than the environment's window bookkeeping,
+        which reports a sentinel when no qualifying strike ever formed.
+        """
+        times = sorted(a.arrived_min for a in self.on_target)
+        return times[-1] - times[0] if len(times) > 1 else 0.0
+
     def summary(self) -> str:
         verdict = {
             "target_destroyed": "target destroyed",
-            "shot_down": f"{self.asset_label} lost to air defence",
+            "team_attrited": "package lost to air defence",
+            "uncoordinated": "strike failed — arrivals never coincided",
             "out_of_fuel": "aborted — out of fuel",
         }.get(self.outcome, self.outcome)
-        return (
-            f"{verdict} · {self.route_km:,.0f} km routed over "
-            f"{self.duration_min:,.0f} min · {len(self.waypoints)} waypoints"
-        )
+
+        parts = [verdict, f"{len(self.on_target)}/{len(self.assets)} on target"]
+        if len(self.on_target) > 1:
+            parts.append(f"{self.tot_spread_min:,.0f} min apart")
+        return " · ".join(parts)
 
 
-def _closest_margin(track: list[Position], sites: list[DefenceSite]) -> tuple[float, str | None]:
-    """Smallest gap between the route and any live engagement envelope.
+def _closest_margin(
+    track: list[Position], sites: list[DefenceSite]
+) -> tuple[float, str | None]:
+    """Smallest gap between a route and any live engagement envelope.
 
     Negative means the route entered one. Sites the aircraft was flying above
     are skipped for the leg where that held, since they could not reach it.
@@ -72,7 +113,7 @@ def _waypoints(track: list[Position], turn_threshold_deg: float = 8.0) -> list[W
     """Compress the per-minute track into turn points a briefing could use.
 
     The policy emits a heading correction every step; most are tiny. Only
-    changes past the threshold become waypoints, plus the start and the target.
+    changes past the threshold become waypoints, plus the start and the end.
     """
     if len(track) < 2:
         return []
@@ -88,9 +129,7 @@ def _waypoints(track: list[Position], turn_threshold_deg: float = 8.0) -> list[W
             heading = leg
 
     last = len(track) - 1
-    points.append(
-        Waypoint(last, track[last], heading, last * STEP_SECONDS / 60.0)
-    )
+    points.append(Waypoint(last, track[last], heading, last * STEP_SECONDS / 60.0))
     return points
 
 
@@ -99,32 +138,54 @@ def plan_mission(
     model: ActorCritic,
     norm: RunningNorm,
     seed: int = 0,
-    asset_label: str = "BLUE",
-) -> MissionPlan:
+    labels: list[str] | None = None,
+) -> PackagePlan:
     """Fly the deterministic policy through `scenario` and package the result."""
     env = MissionEnv(random.Random(seed))
     obs = env.reset(scenario)
 
     while True:
         with torch.no_grad():
-            action = model.actor(torch.as_tensor(norm(obs[None]))).numpy()[0]
-        obs, _, done, info = env.step(action)
-        if done:
+            actions = model.actor(torch.as_tensor(norm(obs))).numpy()
+        obs, _, _, info = env.step(actions)
+        if info:
             break
 
-    track = env.track
-    route_km = sum(great_circle_km(a, b) for a, b in zip(track, track[1:]))
-    margin, culprit = _closest_margin(track, scenario.defences)
+    assets = []
+    for i, asset in enumerate(env.assets):
+        track = env.tracks[i]
+        margin, culprit = _closest_margin(track, scenario.defences)
+        if asset.arrived_at is not None:
+            fate = "on_target"
+        elif not asset.alive:
+            fate = "lost"
+        else:
+            fate = "returned"
 
-    return MissionPlan(
+        assets.append(
+            AssetPlan(
+                label=(labels[i] if labels and i < len(labels) else f"BLUE {i + 1}"),
+                fate=fate,
+                track=track,
+                waypoints=_waypoints(track),
+                route_km=sum(
+                    great_circle_km(a, b) for a, b in zip(track, track[1:])
+                ),
+                arrived_min=(
+                    asset.arrived_at * STEP_SECONDS / 60.0
+                    if asset.arrived_at is not None
+                    else None
+                ),
+                closest_margin_km=margin,
+                threatening_site=culprit,
+            )
+        )
+
+    return PackagePlan(
         outcome=info["outcome"],
-        track=track,
-        waypoints=_waypoints(track),
-        route_km=route_km,
-        duration_min=(len(track) - 1) * STEP_SECONDS / 60.0,
-        closest_margin_km=margin,
-        threatening_site=culprit,
-        asset_label=asset_label,
+        assets=assets,
+        coordination=info.get("coordination", 0.0),
+        duration_min=env.steps * STEP_SECONDS / 60.0,
     )
 
 
@@ -132,9 +193,9 @@ def load_and_plan(
     policy_path: Path,
     scenario: Scenario,
     seed: int = 0,
-    asset_label: str = "BLUE",
-) -> MissionPlan:
+    labels: list[str] | None = None,
+) -> PackagePlan:
     from ppo import load_policy
 
     model, norm = load_policy(policy_path)
-    return plan_mission(scenario, model, norm, seed, asset_label)
+    return plan_mission(scenario, model, norm, seed, labels)

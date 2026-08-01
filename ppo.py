@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from env import ACT_DIM, OBS_DIM, VecEnv
+from env import ACT_DIM, MAX_TEAM, OBS_DIM, VecEnv
 
 
 @dataclass
@@ -128,12 +128,15 @@ class TrainStats:
     """Per-iteration diagnostics, kept so training progress can be asserted on."""
 
     steps: int = 0
+    agent_steps: int = 0
     outcomes: dict = field(default_factory=dict)
     mean_return: float = 0.0
     success_rate: float = 0.0
     policy_loss: float = 0.0
     value_loss: float = 0.0
     entropy: float = 0.0
+    coordination: float = 0.0   # arrival tightness on successful missions
+    survivors: float = 0.0      # assets still flying when the target went down
 
 
 def compute_gae(
@@ -180,74 +183,97 @@ class PPOTrainer:
 
     def train(self, log_every: int = 5, on_log=None) -> list[TrainStats]:
         cfg = self.cfg
-        raw_obs = self.envs.reset()
-        self.obs_norm.update(raw_obs)
+        # One trajectory stream per asset slot, across all envs.
+        streams = cfg.num_envs * MAX_TEAM
+
+        raw_obs, mask = self.envs.reset()
+        self.obs_norm.update(self._active_rows(raw_obs, mask))
         obs = self.obs_norm(raw_obs)
 
         iterations = cfg.total_steps // cfg.batch_size
         episode_returns = np.zeros(cfg.num_envs, dtype=np.float32)
         recent_returns: list[float] = []
         recent_outcomes: list[str] = []
+        recent_teaming: list[dict] = []
         step_count = 0
+        agent_steps = 0
 
+        shape = (cfg.rollout_steps, cfg.num_envs, MAX_TEAM)
         for it in range(1, iterations + 1):
             # Linear learning-rate decay, standard for PPO stability late on.
             frac = 1.0 - (it - 1) / iterations
             for group in self.optimiser.param_groups:
                 group["lr"] = frac * cfg.learning_rate
 
-            obs_buf = np.zeros((cfg.rollout_steps, cfg.num_envs, OBS_DIM), dtype=np.float32)
-            act_buf = np.zeros((cfg.rollout_steps, cfg.num_envs, ACT_DIM), dtype=np.float32)
-            logp_buf = np.zeros((cfg.rollout_steps, cfg.num_envs), dtype=np.float32)
-            rew_buf = np.zeros((cfg.rollout_steps, cfg.num_envs), dtype=np.float32)
-            done_buf = np.zeros((cfg.rollout_steps, cfg.num_envs), dtype=np.float32)
-            val_buf = np.zeros((cfg.rollout_steps, cfg.num_envs), dtype=np.float32)
+            obs_buf = np.zeros(shape + (OBS_DIM,), dtype=np.float32)
+            act_buf = np.zeros(shape + (ACT_DIM,), dtype=np.float32)
+            logp_buf = np.zeros(shape, dtype=np.float32)
+            rew_buf = np.zeros(shape, dtype=np.float32)
+            done_buf = np.zeros(shape, dtype=np.float32)
+            val_buf = np.zeros(shape, dtype=np.float32)
+            mask_buf = np.zeros(shape, dtype=np.float32)
 
             for t in range(cfg.rollout_steps):
                 obs_buf[t] = obs
+                # The mask belongs to the observation the action is chosen from,
+                # so it is recorded before stepping, not after.
+                mask_buf[t] = mask
+
                 with torch.no_grad():
-                    tensor_obs = torch.as_tensor(obs, device=self.device)
-                    action, logp, value = self.model.act(tensor_obs)
+                    flat = torch.as_tensor(obs.reshape(-1, OBS_DIM), device=self.device)
+                    action, logp, value = self.model.act(flat)
 
-                act_buf[t] = action.cpu().numpy()
-                logp_buf[t] = logp.cpu().numpy()
-                val_buf[t] = value.cpu().numpy()
+                act_buf[t] = action.cpu().numpy().reshape(cfg.num_envs, MAX_TEAM, ACT_DIM)
+                logp_buf[t] = logp.cpu().numpy().reshape(cfg.num_envs, MAX_TEAM)
+                val_buf[t] = value.cpu().numpy().reshape(cfg.num_envs, MAX_TEAM)
 
-                raw_obs, reward, done, infos = self.envs.step(act_buf[t])
-                self.obs_norm.update(raw_obs)
+                raw_obs, reward, done, mask, env_dones, infos = self.envs.step(act_buf[t])
+                self.obs_norm.update(self._active_rows(raw_obs, mask))
                 obs = self.obs_norm(raw_obs)
 
                 rew_buf[t] = reward
                 done_buf[t] = done
-                episode_returns += reward
+                episode_returns += reward.sum(axis=1)
+                # `total_steps` is an env-step budget, which is what drives the
+                # iteration count; agent steps are tracked separately because a
+                # package of 3 produces 3 transitions per env step.
                 step_count += cfg.num_envs
+                agent_steps += int(mask_buf[t].sum())
 
-                for i, d in enumerate(done):
-                    if d:
-                        recent_returns.append(float(episode_returns[i]))
-                        episode_returns[i] = 0.0
                 for info in infos:
                     recent_outcomes.append(info["outcome"])
+                    recent_teaming.append(info)
+                for i in np.flatnonzero(env_dones):
+                    recent_returns.append(float(episode_returns[i]))
+                    episode_returns[i] = 0.0
 
             with torch.no_grad():
-                last_value = (
-                    self.model.value(torch.as_tensor(obs, device=self.device))
-                    .cpu()
-                    .numpy()
-                )
+                flat = torch.as_tensor(obs.reshape(-1, OBS_DIM), device=self.device)
+                last_value = self.model.value(flat).cpu().numpy().reshape(streams)
 
             advantages, returns = compute_gae(
-                rew_buf, val_buf, done_buf, last_value, cfg.gamma, cfg.gae_lambda
+                rew_buf.reshape(cfg.rollout_steps, streams),
+                val_buf.reshape(cfg.rollout_steps, streams),
+                done_buf.reshape(cfg.rollout_steps, streams),
+                last_value,
+                cfg.gamma,
+                cfg.gae_lambda,
             )
-            stats = self._update(obs_buf, act_buf, logp_buf, advantages, returns)
+            stats = self._update(obs_buf, act_buf, logp_buf, advantages, returns, mask_buf)
 
             stats.steps = step_count
+            stats.agent_steps = agent_steps
             window_out = recent_outcomes[-400:]
             stats.outcomes = {o: window_out.count(o) for o in set(window_out)}
             stats.success_rate = (
                 window_out.count("target_destroyed") / len(window_out) if window_out else 0.0
             )
             stats.mean_return = float(np.mean(recent_returns[-200:])) if recent_returns else 0.0
+
+            wins = [t for t in recent_teaming[-400:] if t["outcome"] == "target_destroyed"]
+            if wins:
+                stats.coordination = float(np.mean([w["coordination"] for w in wins]))
+                stats.survivors = float(np.mean([w["survivors"] for w in wins]))
             self.history.append(stats)
 
             if on_log and (it % log_every == 0 or it == iterations):
@@ -255,22 +281,41 @@ class PPOTrainer:
 
         return self.history
 
-    def _update(self, obs_buf, act_buf, logp_buf, advantages, returns) -> TrainStats:
-        cfg = self.cfg
-        b_obs = torch.as_tensor(obs_buf.reshape(-1, OBS_DIM), device=self.device)
-        b_act = torch.as_tensor(act_buf.reshape(-1, ACT_DIM), device=self.device)
-        b_logp = torch.as_tensor(logp_buf.reshape(-1), device=self.device)
-        b_adv = torch.as_tensor(advantages.reshape(-1), device=self.device)
-        b_ret = torch.as_tensor(returns.reshape(-1), device=self.device)
+    @staticmethod
+    def _active_rows(obs: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Only real, flying assets — padded slots are zeros and would skew the
+        running mean and variance toward nothing."""
+        rows = obs.reshape(-1, OBS_DIM)[mask.reshape(-1) > 0]
+        return rows if len(rows) else np.zeros((1, OBS_DIM), dtype=np.float32)
 
-        indices = np.arange(cfg.batch_size)
-        minibatch_size = cfg.batch_size // cfg.minibatches
+    def _update(self, obs_buf, act_buf, logp_buf, advantages, returns, mask_buf) -> TrainStats:
+        cfg = self.cfg
+        # Keep only transitions from assets that were actually flying: dead
+        # assets and padded slots produce zeros that would otherwise be trained
+        # on as if they were real decisions.
+        keep = mask_buf.reshape(-1) > 0
+        b_obs = torch.as_tensor(obs_buf.reshape(-1, OBS_DIM)[keep], device=self.device)
+        b_act = torch.as_tensor(act_buf.reshape(-1, ACT_DIM)[keep], device=self.device)
+        b_logp = torch.as_tensor(logp_buf.reshape(-1)[keep], device=self.device)
+        b_adv = torch.as_tensor(advantages.reshape(-1)[keep], device=self.device)
+        b_ret = torch.as_tensor(returns.reshape(-1)[keep], device=self.device)
+
+        samples = int(keep.sum())
+        if samples < cfg.minibatches:
+            return TrainStats()
+
+        # Masking makes the batch size vary from iteration to iteration, so the
+        # minibatches are split rather than sized. A fixed stride leaves a
+        # remainder chunk that can hold a single sample, and the unbiased
+        # std() of one element is NaN — which propagates into every gradient.
+        indices = np.arange(samples)
         losses = {"policy": [], "value": [], "entropy": []}
 
         for _ in range(cfg.epochs):
             np.random.shuffle(indices)
-            for start in range(0, cfg.batch_size, minibatch_size):
-                idx = indices[start : start + minibatch_size]
+            for idx in np.array_split(indices, cfg.minibatches):
+                if len(idx) < 2:
+                    continue
                 new_logp, entropy, value = self.model.evaluate(b_obs[idx], b_act[idx])
 
                 ratio = (new_logp - b_logp[idx]).exp()

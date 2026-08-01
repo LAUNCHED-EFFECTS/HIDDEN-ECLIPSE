@@ -60,11 +60,20 @@ def marker_hovertemplate(name: str) -> str:
     )
 
 
-def _marker_trace(pos: Position, name: str, colour: str, symbol: str) -> go.Scattergeo:
+def _marker_trace(
+    pos: Position, name: str, colour: str, symbol: str, meta: dict | None = None
+) -> go.Scattergeo:
+    """A principal's marker.
+
+    `meta` tags the trace so the browser can find it by role rather than by
+    name. Name matching is not safe here: once a mission is planned the route
+    traces are called "BLUE 2 · 1,245 km" and a prefix search finds those first.
+    """
     return go.Scattergeo(
         lat=[pos.lat],
         lon=[pos.lon],
         name=name,
+        meta=meta,
         mode="markers+text",
         marker=dict(
             size=14,
@@ -125,45 +134,59 @@ def _defence_marker_trace(sites: list[DefenceSite]) -> go.Scattergeo:
     )
 
 
-def _route_traces(plan) -> list[go.Scattergeo]:
-    """The flown route plus its waypoints, as two traces."""
-    track = plan.track
-    ok = plan.succeeded
-    return [
-        go.Scattergeo(
-            lat=[p.lat for p in track],
-            lon=[p.lon for p in track],
-            name=f"Planned route · {plan.route_km:,.0f} km",
-            mode="lines",
-            line=dict(width=2.5, color=ROUTE_COLOUR if ok else ROUTE_FAILED_COLOUR),
-            legendgroup="route",
-            hoverinfo="skip",
-        ),
-        go.Scattergeo(
-            lat=[w.position.lat for w in plan.waypoints],
-            lon=[w.position.lon for w in plan.waypoints],
-            name=f"Waypoints · {len(plan.waypoints)}",
-            mode="markers",
-            marker=dict(
-                size=6,
-                color=ROUTE_COLOUR if ok else ROUTE_FAILED_COLOUR,
-                symbol="circle",
-                line=dict(width=1, color=SURFACE),
-            ),
-            legendgroup="route",
-            customdata=[
-                [i + 1, w.position.alt_m, w.heading, w.elapsed_min]
-                for i, w in enumerate(plan.waypoints)
-            ],
-            hovertemplate=(
-                "<b>WP %{customdata[0]}</b><br>"
-                "%{lat:.4f}°, %{lon:.4f}°<br>"
-                "%{customdata[1]:,.0f} m · heading %{customdata[2]:03.0f}°<br>"
-                "T+%{customdata[3]:,.0f} min"
-                "<extra></extra>"
-            ),
-        ),
-    ]
+def _route_traces(package) -> list[go.Scattergeo]:
+    """Every asset's route and waypoints — two traces per aircraft.
+
+    Each leg is coloured by that aircraft's own fate, so a package where one
+    got through and another was lost reads correctly on the map instead of
+    collapsing into a single verdict.
+    """
+    traces = []
+    for asset in package.assets:
+        if len(asset.track) < 2:
+            continue
+        colour = ROUTE_COLOUR if asset.succeeded else ROUTE_FAILED_COLOUR
+        group = f"route-{asset.label}"
+
+        traces.append(
+            go.Scattergeo(
+                lat=[p.lat for p in asset.track],
+                lon=[p.lon for p in asset.track],
+                name=f"{asset.label} · {asset.route_km:,.0f} km",
+                mode="lines",
+                line=dict(width=2.5, color=colour),
+                legendgroup=group,
+                hoverinfo="skip",
+            )
+        )
+        traces.append(
+            go.Scattergeo(
+                lat=[w.position.lat for w in asset.waypoints],
+                lon=[w.position.lon for w in asset.waypoints],
+                name=f"{asset.label} waypoints",
+                mode="markers",
+                marker=dict(
+                    size=6,
+                    color=colour,
+                    symbol="circle",
+                    line=dict(width=1, color=SURFACE),
+                ),
+                legendgroup=group,
+                showlegend=False,
+                customdata=[
+                    [i + 1, w.position.alt_m, w.heading, w.elapsed_min]
+                    for i, w in enumerate(asset.waypoints)
+                ],
+                hovertemplate=(
+                    f"<b>{asset.label} WP %{{customdata[0]}}</b><br>"
+                    "%{lat:.4f}°, %{lon:.4f}°<br>"
+                    "%{customdata[1]:,.0f} m · heading %{customdata[2]:03.0f}°<br>"
+                    "T+%{customdata[3]:,.0f} min"
+                    "<extra></extra>"
+                ),
+            )
+        )
+    return traces
 
 
 # How far out toward the viewport edge the further principal is allowed to sit.
@@ -231,6 +254,7 @@ def title_text(
     plan=None,
     hostile_name: str = "RED",
     friendly_name: str = "BLUE",
+    package_size: int = 1,
 ) -> str:
     """The title block. Split out so the server can refresh it after a drag.
 
@@ -241,7 +265,8 @@ def title_text(
     return (
         "Tactical picture<br>"
         f"<span style='font-size:13px;color:{TEXT_SECONDARY}'>"
-        f"{friendly_name} → {hostile_name}<br>"
+        f"{friendly_name}{f' +{package_size - 1}' if package_size > 1 else ''}"
+        f" → {hostile_name}<br>"
         f"{slant_range_km(hostile, friendly):,.0f} km slant · "
         f"{great_circle_km(hostile, friendly):,.0f} km ground<br>"
         f"bearing {initial_bearing_deg(friendly, hostile):03.0f}° true · "
@@ -253,20 +278,33 @@ def title_text(
 
 def build_globe(
     hostile: Position,
-    friendly: Position,
+    friendlies: list[Position] | Position,
     defences: list[DefenceSite] | None = None,
     plan=None,
     hostile_name: str = "RED",
-    friendly_name: str = "BLUE",
+    friendly_names: list[str] | str | None = None,
 ) -> go.Figure:
-    """Build the globe figure with both positions, the arc, defences and route."""
-    centre = midpoint(hostile, friendly)
+    """Build the globe: the package, RED, the defences, and any planned routes.
+
+    `friendlies` accepts a bare Position for the single-asset case, so callers
+    that predate the package do not have to wrap it.
+    """
+    if isinstance(friendlies, Position):
+        friendlies = [friendlies]
+    if friendly_names is None:
+        friendly_names = [f"BLUE {i + 1}" for i in range(len(friendlies))]
+    elif isinstance(friendly_names, str):
+        friendly_names = [friendly_names]
+
+    lead = friendlies[0]
+    # The ground track and the camera framing both reference the lead asset.
+    centre = midpoint(hostile, lead)
 
     fig = go.Figure()
 
     # Trace 0, so the markers sit on top of it — and so ARC_TRACE_INDEX and the
     # drag handler's lookup both stay valid.
-    fig.add_trace(_ground_track_trace(hostile, friendly))
+    fig.add_trace(_ground_track_trace(hostile, lead))
     # Rings first, then site markers, then the two principals — so nothing
     # important ends up underneath a threat envelope.
     for site in defences or []:
@@ -277,8 +315,21 @@ def build_globe(
         for trace in _route_traces(plan):
             fig.add_trace(trace)
 
-    fig.add_trace(_marker_trace(hostile, hostile_name, HOSTILE_COLOUR, "diamond"))
-    fig.add_trace(_marker_trace(friendly, friendly_name, FRIENDLY_COLOUR, "circle"))
+    fig.add_trace(
+        _marker_trace(
+            hostile, hostile_name, HOSTILE_COLOUR, "diamond", meta={"role": "hostile"}
+        )
+    )
+    for i, (position, name) in enumerate(zip(friendlies, friendly_names)):
+        fig.add_trace(
+            _marker_trace(
+                position,
+                name,
+                FRIENDLY_COLOUR,
+                "circle",
+                meta={"role": "asset", "asset": i},
+            )
+        )
 
     fig.update_geos(
         projection=dict(
@@ -305,7 +356,14 @@ def build_globe(
 
     fig.update_layout(
         title=dict(
-            text=title_text(hostile, friendly, plan, hostile_name, friendly_name),
+            text=title_text(
+                hostile,
+                lead,
+                plan,
+                hostile_name,
+                friendly_names[0],
+                package_size=len(friendlies),
+            ),
             font=dict(size=20, color=TEXT_PRIMARY),
             x=0.03,
             y=0.95,
@@ -321,7 +379,9 @@ def build_globe(
         ),
         # Read by FIT_SCRIPT in the browser, which is where the window's aspect
         # ratio — the other half of the zoom calculation — is known.
-        meta=dict(fitMaxScale=fit_scale_limit(hostile, friendly)),
+        meta=dict(fitMaxScale=min(
+            fit_scale_limit(hostile, f) for f in friendlies
+        )),
         paper_bgcolor=SURFACE,
         # Non-zero left/right so nothing sits flush against the window edge,
         # and enough top for the four-line title block.
@@ -495,13 +555,28 @@ CONTROL_STYLE = f"""
     color: {TEXT_SECONDARY};
     font-weight: 500;
   }}
-  #callsign-row {{
+  #asset-list {{
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }}
+  .asset-row {{
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 6px;
     color: {TEXT_SECONDARY};
   }}
-  #callsign-row input {{
+  .asset-label {{
+    min-width: 128px;
+    text-align: right;
+    color: {TEXT_PRIMARY};
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }}
+  .asset-row input {{
     padding: 6px 8px;
     border-radius: 5px;
     border: 1px solid #39414d;
@@ -509,17 +584,35 @@ CONTROL_STYLE = f"""
     color: {TEXT_PRIMARY};
     font: inherit;
   }}
-  #blue-number {{ width: 56px; }}
-  #blue-callsign {{ width: 130px; }}
-  #callsign-row button {{
-    padding: 6px 12px;
+  .asset-number {{ width: 56px; }}
+  .asset-callsign {{ width: 120px; }}
+  .asset-row button {{
+    padding: 6px 10px;
     border-color: {FRIENDLY_COLOUR};
     background: rgba(57, 135, 229, 0.12);
     color: {FRIENDLY_COLOUR};
     font-weight: 500;
   }}
-  #callsign-row button:hover:not(:disabled) {{
+  .asset-row button:hover:not(:disabled) {{
     background: rgba(57, 135, 229, 0.22);
+  }}
+  .asset-remove {{
+    min-width: 32px;
+    border-color: {ROUTE_FAILED_COLOUR} !important;
+    background: rgba(237, 161, 0, 0.12) !important;
+    color: {ROUTE_FAILED_COLOUR} !important;
+  }}
+  .asset-remove:hover:not(:disabled) {{
+    background: rgba(237, 161, 0, 0.22) !important;
+  }}
+  #add-asset {{
+    border-color: {TEXT_SECONDARY};
+    background: rgba(166, 173, 184, 0.10);
+    color: {TEXT_SECONDARY};
+    font-weight: 500;
+  }}
+  #add-asset:hover:not(:disabled) {{
+    background: rgba(166, 173, 184, 0.20);
   }}
   #mission-status {{
     max-width: 320px;
@@ -529,20 +622,34 @@ CONTROL_STYLE = f"""
 </style>
 """
 
-def control_html(blue_number: int = 1, blue_callsign: str = "") -> str:
-    """Mission controls, pre-filled with the asset's current callsign."""
-    callsign = html_escape(blue_callsign or "", quote=True)
+def control_html(assets: list[dict] | None = None) -> str:
+    """Mission controls, with every aircraft in the package listed at once.
+
+    Each row owns its aircraft: the fields are pre-filled from it, and the
+    buttons act on the index in its `data-asset` attribute — so nothing has to
+    track a current selection.
+    """
+    assets = assets or [{"number": 1, "callsign": "", "label": "BLUE 1"}]
+    rows = "\n".join(
+        f"""    <div class="asset-row" data-asset="{i}">
+      <span class="asset-label">{html_escape(a["label"])}</span>
+      <input class="asset-number" type="number" min="1" step="1"
+             value="{int(a["number"])}" title="asset number">
+      <input class="asset-callsign" type="text" placeholder="callsign"
+             value="{html_escape(a["callsign"] or "", quote=True)}" maxlength="24">
+      <button class="asset-rename" title="apply this number and callsign">Rename</button>
+      <button class="asset-remove" title="remove this aircraft">&minus;</button>
+    </div>"""
+        for i, a in enumerate(assets)
+    )
     return f"""
 <div id="mission-controls">
   <button id="plan-mission">Plan mission</button>
   <button id="new-scenario">New scenario</button>
-  <div id="callsign-row">
-    <label for="blue-number">BLUE</label>
-    <input id="blue-number" type="number" min="1" step="1" value="{int(blue_number)}">
-    <input id="blue-callsign" type="text" placeholder="callsign" value="{callsign}"
-           maxlength="24">
-    <button id="apply-callsign">Rename</button>
+  <div id="asset-list">
+{rows}
   </div>
+  <button id="add-asset">+ Add aircraft</button>
   <div id="mission-status"></div>
 </div>
 """
@@ -598,17 +705,30 @@ CONTROL_SCRIPT = """
             });
     });
 
-    // ---- rename the friendly asset ---------------------------------------
-    var applyBtn = document.getElementById('apply-callsign');
-    var numberInput = document.getElementById('blue-number');
-    var callsignInput = document.getElementById('blue-callsign');
+    // ---- rename / add / remove assets ------------------------------------
+    //
+    // Every aircraft has its own row, so the handlers are delegated off the
+    // list and read the index from the row's data-asset attribute. Nothing
+    // tracks a "current" aircraft.
+    var assetList = document.getElementById('asset-list');
+    var addBtn = document.getElementById('add-asset');
 
-    function applyCallsign() {
-        applyBtn.disabled = true;
+    function rowIndex(row) {
+        return parseInt(row.getAttribute('data-asset'), 10);
+    }
+
+    function renameFrom(row) {
+        var index = rowIndex(row);
+        var numberInput = row.querySelector('.asset-number');
+        var callsignInput = row.querySelector('.asset-callsign');
+        var button = row.querySelector('.asset-rename');
+
+        button.disabled = true;
         fetch('/callsign', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
+                index: index,
                 number: parseInt(numberInput.value, 10),
                 callsign: callsignInput.value,
             }),
@@ -616,32 +736,64 @@ CONTROL_SCRIPT = """
         .then(function (r) { return r.json(); })
         .then(function (data) {
             if (data.error) { status.textContent = data.error; return; }
-            var idx = blueIndex();
-            if (idx >= 0) {
+
+            var trace = traceForAsset(index);
+            if (trace >= 0) {
                 // name drives the legend, text the on-map label, and the
                 // hovertemplate has the name baked in — all three move together.
                 Plotly.restyle(gd, {
                     name: [data.label],
                     text: [[data.label]],
                     hovertemplate: [data.hovertemplate],
-                }, [idx]);
+                }, [trace]);
             }
             if (data.title) { Plotly.relayout(gd, {'title.text': data.title}); }
+
+            row.querySelector('.asset-label').textContent = data.label;
             numberInput.value = data.number;
             callsignInput.value = data.callsign;
             status.textContent = data.summary;
         })
         .catch(function (err) { status.textContent = 'rename failed: ' + err.message; })
-        .finally(function () { applyBtn.disabled = false; });
+        .finally(function () { button.disabled = false; });
     }
 
-    if (applyBtn) {
-        applyBtn.addEventListener('click', applyCallsign);
-        [numberInput, callsignInput].forEach(function (el) {
-            el.addEventListener('keydown', function (ev) {
-                if (ev.key === 'Enter') { applyCallsign(); }
-            });
+    // Adding or removing changes the trace list wholesale, so the page is
+    // rebuilt rather than patched — far less to get wrong than splicing traces
+    // and re-indexing everything that refers to them.
+    function editPackage(action, index) {
+        status.textContent = action === 'add' ? 'adding…' : 'removing…';
+        fetch('/assets', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: action, index: index}),
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (data.error) { status.textContent = data.error; return; }
+            window.location.reload();
+        })
+        .catch(function (err) { status.textContent = 'failed: ' + err.message; });
+    }
+
+    if (assetList) {
+        assetList.addEventListener('click', function (ev) {
+            var row = ev.target.closest ? ev.target.closest('.asset-row') : null;
+            if (!row) { return; }
+            if (ev.target.classList.contains('asset-rename')) { renameFrom(row); }
+            else if (ev.target.classList.contains('asset-remove')) {
+                editPackage('remove', rowIndex(row));
+            }
         });
+        assetList.addEventListener('keydown', function (ev) {
+            if (ev.key !== 'Enter') { return; }
+            var row = ev.target.closest ? ev.target.closest('.asset-row') : null;
+            if (row) { renameFrom(row); }
+        });
+    }
+
+    if (addBtn) {
+        addBtn.addEventListener('click', function () { editPackage('add', 0); });
     }
 
     // ---- drag BLUE to reposition it -------------------------------------
@@ -654,6 +806,8 @@ CONTROL_SCRIPT = """
     // off by a constant, this cancels it out for the rest of the drag.
     var HIT_RADIUS = 18;
     var dragging = false;
+    var dragTrace = -1;      // plotly trace being dragged
+    var dragAsset = -1;      // that trace's index within the package
     var calibration = [0, 0];
 
     function subplot() {
@@ -661,11 +815,22 @@ CONTROL_SCRIPT = """
         return fl && fl.geo && fl.geo._subplot;
     }
 
-    // Prefix match, not equality: the trace is named "BLUE 2 (Viper)" once a
-    // callsign is set, and an exact test would silently stop finding it.
-    function blueIndex() {
+    // Marker traces are tagged with meta.role, because names are ambiguous:
+    // after planning, "BLUE 2 · 1,245 km" is a route and "BLUE 2 waypoints" is
+    // its turn points, and a name search would find those instead.
+    function assetTraces() {
+        var found = [];
         for (var i = 0; i < gd.data.length; i++) {
-            if ((gd.data[i].name || '').indexOf('BLUE') === 0) { return i; }
+            var m = gd.data[i].meta;
+            if (m && m.role === 'asset') { found.push({trace: i, asset: m.asset}); }
+        }
+        return found;
+    }
+
+    function traceForAsset(assetIndex) {
+        var all = assetTraces();
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].asset === assetIndex) { return all[i].trace; }
         }
         return -1;
     }
@@ -705,21 +870,38 @@ CONTROL_SCRIPT = """
     // Capture phase: this has to beat the globe's own rotate-drag handler,
     // which is bound to a descendant of gd.
     gd.addEventListener('mousedown', function (ev) {
-        var idx = blueIndex();
-        if (idx < 0) { return; }
+        // Any asset is draggable, so test them all and take the nearest hit
+        // rather than assuming the lead.
+        var best = null, bestDist = Infinity;
+        var candidates = assetTraces();
 
-        var hit = onMarker(ev, idx);
-        if (!hit) { return; }
+        for (var i = 0; i < candidates.length; i++) {
+            var idx = candidates[i].trace;
+            var hit = onMarker(ev, idx);
+            if (!hit) { continue; }
+            var screen = toScreen(gd.data[idx].lon[0], gd.data[idx].lat[0]);
+            var dist = 0;
+            if (screen) {
+                var dx = ev.clientX - screen[0], dy = ev.clientY - screen[1];
+                dist = Math.sqrt(dx * dx + dy * dy);
+            }
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = {trace: idx, asset: candidates[i].asset, hit: hit, screen: screen};
+            }
+        }
+        if (!best) { return; }
 
         calibration = [0, 0];
-        var screen = toScreen(gd.data[idx].lon[0], gd.data[idx].lat[0]);
-        if (hit === 'dom' && screen) {
-            calibration = [ev.clientX - screen[0], ev.clientY - screen[1]];
+        if (best.hit === 'dom' && best.screen) {
+            calibration = [ev.clientX - best.screen[0], ev.clientY - best.screen[1]];
         }
 
         dragging = true;
+        dragTrace = best.trace;
+        dragAsset = best.asset;
         gd.style.cursor = 'grabbing';
-        status.textContent = 'moving BLUE…';
+        status.textContent = 'moving ' + (gd.data[best.trace].name || 'asset') + '…';
         ev.preventDefault();
         ev.stopPropagation();
     }, true);
@@ -730,11 +912,8 @@ CONTROL_SCRIPT = """
 
     function flush() {
         queued = null;
-        if (!dragging || !pending) { return; }
-        var idx = blueIndex();
-        if (idx >= 0) {
-            Plotly.restyle(gd, {lon: [[pending[0]]], lat: [[pending[1]]]}, [idx]);
-        }
+        if (!dragging || !pending || dragTrace < 0) { return; }
+        Plotly.restyle(gd, {lon: [[pending[0]]], lat: [[pending[1]]]}, [dragTrace]);
     }
 
     var pending = null;
@@ -755,7 +934,8 @@ CONTROL_SCRIPT = """
         dragging = false;
         gd.style.cursor = '';
 
-        var idx = blueIndex();
+        var idx = dragTrace, asset = dragAsset;
+        dragTrace = -1;
         if (idx < 0) { return; }
 
         // A frame may still be queued; apply it so the committed position is
@@ -778,7 +958,7 @@ CONTROL_SCRIPT = """
             return fetch('/blue', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({lat: lat, lon: lon}),
+                body: JSON.stringify({index: asset, lat: lat, lon: lon}),
             });
         })
         .then(function (r) { return r.json(); })
@@ -815,8 +995,7 @@ CONTROL_SCRIPT = """
 def render_html(
     fig: go.Figure,
     interactive: bool = False,
-    blue_number: int = 1,
-    blue_callsign: str = "",
+    assets: list[dict] | None = None,
 ) -> str:
     """Full-window HTML for the figure.
 
@@ -837,9 +1016,7 @@ def render_html(
     )
     html = html.replace("</head>", f"{head}</head>", 1)
     if interactive:
-        html = html.replace(
-            "<body>", f"<body>{control_html(blue_number, blue_callsign)}", 1
-        )
+        html = html.replace("<body>", f"<body>{control_html(assets)}", 1)
     return html
 
 

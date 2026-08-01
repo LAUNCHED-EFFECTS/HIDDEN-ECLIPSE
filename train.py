@@ -35,8 +35,8 @@ def main() -> None:
 
     print(f"  training PPO for {cfg.total_steps:,} steps "
           f"({cfg.num_envs} envs x {cfg.rollout_steps} steps per batch)")
-    print(f"  {'iter':>6}  {'steps':>9}  {'return':>8}  {'success':>8}  "
-          f"{'shot down':>10}  {'no fuel':>8}  {'entropy':>8}")
+    print(f"  {'iter':>6}  {'steps':>9}  {'agent':>9}  {'return':>8}  {'success':>8}  "
+          f"{'attrited':>9}  {'coord':>6}  {'alive':>6}")
 
     started = time.time()
 
@@ -44,9 +44,9 @@ def main() -> None:
         out = s.outcomes
         n = max(sum(out.values()), 1)
         print(
-            f"  {it:>4}/{total:<3}  {s.steps:>9,}  {s.mean_return:>8.1f}  "
-            f"{s.success_rate:>7.1%}  {out.get('shot_down', 0)/n:>9.1%}  "
-            f"{out.get('out_of_fuel', 0)/n:>7.1%}  {s.entropy:>8.3f}"
+            f"  {it:>4}/{total:<3}  {s.steps:>9,}  {s.agent_steps:>9,}  "
+            f"{s.mean_return:>8.1f}  {s.success_rate:>7.1%}  "
+            f"{out.get('team_attrited', 0)/n:>8.1%}  {s.coordination:>6.2f}  {s.survivors:>6.2f}"
         )
 
     history = trainer.train(on_log=report)
