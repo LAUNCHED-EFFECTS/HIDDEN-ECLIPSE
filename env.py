@@ -9,24 +9,25 @@ Altitude is a real decision rather than decoration, because every defence site
 has a ceiling as well as a radius: climbing over a short-range site is a valid
 alternative to going around it.
 
-Teaming is not assumed, it is priced. Three terms make a coordinated package
-beat the same aircraft flying independently:
+One aircraft reaching RED unengaged destroys the target — the strike does not
+depend on the rest of the package arriving. Teaming is therefore an incentive
+rather than a gate:
 
-  1. The target needs REQUIRED_STRIKES arrivals *within TOT_WINDOW_STEPS of
-     each other*. Arrivals outside that window expire, and an asset that has
-     released is out of the fight — so an early, uncoordinated run does not
-     merely score less, it spends an aircraft for nothing.
-  2. A time-on-target bonus on top, largest when the arrivals land together.
+  1. The first arrival earns the destroy reward: the mission is won there.
+  2. A follow-up arrival inside TOT_WINDOW_STEPS earns the coordination bonus,
+     so a package that presses the attack together scores higher than one that
+     trickles in — but never at the cost of calling a successful strike a
+     failure.
   3. A mutual-support penalty for two assets sitting inside one battery's
      envelope at the same time, where a single engagement can take both.
 
-An earlier version made the window a bonus rather than a requirement. Measured
-against a straight-in baseline the trained policy's arrival tightness was
-identical (0.36 vs 0.35) — the incentive was real but too weak to change
-behaviour, so it flew well individually and never teamed.
+The episode runs until every aircraft has released or been lost, rather than
+stopping at the first arrival, because ending there would leave no opportunity
+for a coordinated follow-up to exist at all.
 
-The reward is otherwise shared: every living asset receives the team's terminal
-outcome, with individual shaping on top so each still learns to fly.
+Arrival rewards are paid at the moment of arrival, not at the end: an aircraft
+that released at minute 40 has already finished its own trajectory and cannot
+be credited afterwards.
 """
 
 from __future__ import annotations
@@ -59,9 +60,10 @@ STRIKE_RADIUS_KM = 20.0                      # close enough to release on RED
 MAX_TEAM = 4
 TEAM_SIZE_RANGE = (2, 4)     # assets per training scenario
 TRACKED_TEAMMATES = 3        # nearest N teammates visible to each asset
-# Arrivals needed to destroy the target, capped by team size so a one-asset
-# package still behaves exactly as it did before teaming existed.
-REQUIRED_STRIKES = 2
+# Arrivals needed to destroy the target. One aircraft reaching RED unengaged is
+# a successful strike; further coordinated arrivals earn a bonus but are never
+# required.
+REQUIRED_STRIKES = 1
 TOT_WINDOW_STEPS = 12        # arrivals inside this window count as coordinated
 MUTUAL_SUPPORT_KM = 60.0     # closer than this inside one envelope is stacking
 
@@ -227,7 +229,6 @@ class MissionEnv:
         self.arrivals: list[int] = []
         self.tracks = [[a.position] for a in self.assets]
         self.outcome: str | None = None
-        self._final_window: int | None = None
         return self.observe()
 
     def step(self, actions: np.ndarray):
@@ -274,12 +275,22 @@ class MissionEnv:
                 continue
 
             if dist <= STRIKE_RADIUS_KM:
-                # Paying for the arrival itself rewarded racing in alone, which
-                # is exactly the behaviour teaming is supposed to replace. The
-                # payment is scaled by how ready the rest of the package is, so
-                # the signal arrives at the moment the decision is made rather
-                # than at the end of the episode where it cannot be credited.
-                rewards[i] += R_ARRIVAL * self._arrival_quality(i)
+                # Paid at the moment of arrival, because this aircraft's
+                # trajectory ends here and nothing later in the episode could be
+                # credited to it.
+                #
+                #   first arrival  -> it destroyed the target: full reward
+                #   later, in the coordination window -> the follow-up bonus
+                #   later, outside it -> the arrival alone
+                #
+                # So a lone aircraft reaching the target is a success on its
+                # own, and a coordinated second run is worth more on top.
+                rewards[i] += R_ARRIVAL
+                if not self.arrivals:
+                    rewards[i] += R_DESTROYED
+                elif self.arrivals_in_window():
+                    rewards[i] += R_TOT_BONUS
+
                 asset.arrived_at = self.steps
                 self.arrivals.append(self.steps)
                 dones[i] = 1.0
@@ -313,28 +324,6 @@ class MissionEnv:
 
     # -- outcome -------------------------------------------------------------
 
-    def _arrival_quality(self, index: int) -> float:
-        """How ready the package is at the moment asset `index` releases, in [0, 1].
-
-        Counts the other assets that could still make the strike window: ones
-        that have already released inside it, plus ones close enough to reach
-        the target before it expires. 1.0 means releasing now completes a
-        coordinated strike; 0.0 means going in alone.
-        """
-        need = self.scenario.required_strikes - 1
-        if need <= 0:
-            return 1.0
-
-        reach = TOT_WINDOW_STEPS * STEP_KM  # how far out a teammate can still be
-        in_position = len(self.arrivals_in_window())
-        for j, other in enumerate(self.assets):
-            if j == index or not other.active:
-                continue
-            if great_circle_km(other.position, self.scenario.target) <= reach:
-                in_position += 1
-
-        return min(1.0, in_position / need)
-
     def arrivals_in_window(self) -> list[int]:
         """Arrivals still counting toward the strike.
 
@@ -351,41 +340,41 @@ class MissionEnv:
         return max(0, TOT_WINDOW_STEPS - (self.steps - min(live)))
 
     def _resolve(self) -> tuple[bool, float, str | None]:
-        """Decide whether the mission has ended, and what the team earns."""
-        required = self.scenario.required_strikes
-        together = self.arrivals_in_window()
+        """Decide whether the mission has ended, and what the team earns.
 
-        if len(together) >= required:
-            self._final_window = together[-1] - together[0]
-            bonus = R_DESTROYED + R_TOT_BONUS * self.coordination()
-            return True, bonus, "target_destroyed"
+        One aircraft reaching the target unengaged is a successful strike. The
+        episode still runs on until the rest of the package is resolved, so a
+        second aircraft can follow up and earn the coordination bonus — ending
+        the moment the first one released would make teaming impossible to
+        reward at all.
 
-        still_flying = sum(1 for a in self.assets if a.active)
-        if len(together) + still_flying < required:
-            # Not enough aircraft left inside the window to finish. If some
-            # already released, the package was spent piecemeal rather than
-            # simply shot down — worth telling apart in the metrics.
-            outcome = "uncoordinated" if self.arrivals else "team_attrited"
+        Rewards for arrivals are paid as they happen (see `step`), not here: an
+        aircraft that released at minute 40 has already ended its own
+        trajectory and cannot be credited at minute 90.
+        """
+        if any(a.active for a in self.assets):
+            if self.steps < MAX_STEPS:
+                return False, 0.0, None
+            # Out of fuel, but the target may already be down.
+            outcome = "target_destroyed" if self.arrivals else "out_of_fuel"
             return True, 0.0, outcome
 
-        if self.steps >= MAX_STEPS:
-            return True, 0.0, "out_of_fuel"
-
-        return False, 0.0, None
+        # Nobody left flying: everyone either released or was lost.
+        if self.arrivals:
+            return True, 0.0, "target_destroyed"
+        return True, 0.0, "team_attrited"
 
     def coordination(self) -> float:
-        """How tightly the qualifying arrivals landed, in [0, 1].
+        """How tightly the arrivals landed, in [0, 1].
 
-        1.0 means simultaneous; 0.0 means a full window apart. A single-asset
-        package scores 1.0 — there is nothing to coordinate.
+        1.0 means simultaneous, 0.0 a full window or more apart. With fewer
+        than two arrivals there is nothing to coordinate, so it reports 1.0 —
+        callers filter on `arrivals` before reading it.
         """
-        required = self.scenario.required_strikes
-        if required < 2:
+        if len(self.arrivals) < 2:
             return 1.0
-        window = getattr(self, "_final_window", None)
-        if window is None:
-            return 0.0
-        return max(0.0, 1.0 - window / TOT_WINDOW_STEPS)
+        spread = self.arrivals[-1] - self.arrivals[0]
+        return max(0.0, 1.0 - spread / TOT_WINDOW_STEPS)
 
     def _stacked_pairs(self) -> int:
         """Pairs of live assets sharing one envelope and sitting close together."""
@@ -414,7 +403,9 @@ class MissionEnv:
             "arrivals": len(self.arrivals),
             "survivors": sum(1 for a in self.assets if a.alive),
             "coordination": self.coordination(),
-            "tot_spread": self._final_window if self._final_window is not None else -1,
+            "tot_spread": (
+                self.arrivals[-1] - self.arrivals[0] if len(self.arrivals) > 1 else 0
+            ),
         }
 
     # -- observations --------------------------------------------------------
@@ -513,7 +504,7 @@ class MissionEnv:
         # way to know whether to press in or hold off.
         required = self.scenario.required_strikes
         obs += [
-            len(self.arrivals_in_window()) / max(required, 1),
+            min(1.0, len(self.arrivals) / max(len(self.assets), 1)),
             self.window_remaining() / TOT_WINDOW_STEPS,
             # Clamped: training only ever saw up to MAX_TEAM aircraft, so a
             # larger package must not push this feature outside the range the

@@ -69,7 +69,6 @@ def summarise(name: str, runs: list[dict]) -> str:
     wins = [r for r in runs if r["outcome"] == "target_destroyed"]
     destroyed = len(wins) / n
     attrited = sum(r["outcome"] == "team_attrited" for r in runs) / n
-    uncoord = sum(r["outcome"] == "uncoordinated" for r in runs) / n
     fuel = sum(r["outcome"] == "out_of_fuel" for r in runs) / n
 
     # Teaming metrics are only meaningful on missions that succeeded — arrival
@@ -80,7 +79,7 @@ def summarise(name: str, runs: list[dict]) -> str:
     stacked = np.mean([r["stacked_steps"] / max(r["steps"], 1) for r in runs])
 
     return (
-        f"  {name:<13} {destroyed:>8.1%} {attrited:>9.1%} {uncoord:>13.1%} {fuel:>9.1%}   "
+        f"  {name:<13} {destroyed:>8.1%} {attrited:>9.1%} {fuel:>9.1%}   "
         f"{coord:>6.2f} {spread:>8.1f} {survivors:>10.2f} {stacked:>9.1%}"
     )
 
@@ -101,7 +100,7 @@ def main() -> None:
     size = args.team_size or "random 2-4"
     print(f"\n  {args.episodes} held-out scenarios, team size {size}, "
           f"identical for every strategy\n")
-    print(f"  {'strategy':<13} {'destroyed':>8} {'attrited':>9} {'uncoordinated':>13} {'no fuel':>9}   "
+    print(f"  {'strategy':<13} {'destroyed':>8} {'attrited':>9} {'no fuel':>9}   "
           f"{'coord':>6} {'spread':>8} {'survivors':>10} {'stacked':>9}")
     for name, runs in results.items():
         print(summarise(name, runs))

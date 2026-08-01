@@ -617,6 +617,11 @@ CONTROL_STYLE = f"""
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    cursor: pointer;
+  }}
+  .asset-label:hover {{
+    color: {FRIENDLY_COLOUR};
+    text-decoration: underline;
   }}
   .asset-row input {{
     padding: 6px 8px;
@@ -674,7 +679,8 @@ def control_html(assets: list[dict] | None = None) -> str:
     assets = assets or [{"number": 1, "callsign": "", "label": "BLUE 1"}]
     rows = "\n".join(
         f"""    <div class="asset-row" data-asset="{i}">
-      <span class="asset-label">{html_escape(a["label"])}</span>
+      <span class="asset-label" title="centre the globe on this aircraft"
+            >{html_escape(a["label"])}</span>
       <input class="asset-number" type="number" min="1" step="1"
              value="{int(a["number"])}" title="asset number">
       <input class="asset-callsign" type="text" placeholder="callsign"
@@ -759,6 +765,21 @@ CONTROL_SCRIPT = """
         return parseInt(row.getAttribute('data-asset'), 10);
     }
 
+    // Clicking an aircraft's name swings the camera onto it. Rotating the
+    // projection is what "centre" means on an orthographic globe — panning
+    // would slide the map instead of turning the sphere.
+    function centreOn(index) {
+        var trace = traceForAsset(index);
+        if (trace < 0) { return; }
+        var lat = gd.data[trace].lat[0];
+        var lon = gd.data[trace].lon[0];
+        Plotly.relayout(gd, {
+            'geo.projection.rotation.lat': lat,
+            'geo.projection.rotation.lon': lon,
+        });
+        status.textContent = 'centred on ' + (gd.data[trace].name || 'aircraft');
+    }
+
     function renameFrom(row) {
         var index = rowIndex(row);
         var numberInput = row.querySelector('.asset-number');
@@ -825,6 +846,9 @@ CONTROL_SCRIPT = """
             if (ev.target.classList.contains('asset-rename')) { renameFrom(row); }
             else if (ev.target.classList.contains('asset-remove')) {
                 editPackage('remove', rowIndex(row));
+            }
+            else if (ev.target.classList.contains('asset-label')) {
+                centreOn(rowIndex(row));
             }
         });
         assetList.addEventListener('keydown', function (ev) {

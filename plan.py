@@ -80,8 +80,7 @@ class PackagePlan:
         verdict = {
             "target_destroyed": "target destroyed",
             "team_attrited": "package lost to air defence",
-            "uncoordinated": "strike failed — arrivals never coincided",
-            "out_of_fuel": "aborted — out of fuel",
+            "out_of_fuel": "aborted — no aircraft reached the target",
         }.get(self.outcome, self.outcome)
 
         parts = [verdict, f"{len(self.on_target)}/{len(self.assets)} on target"]
