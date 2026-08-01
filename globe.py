@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from html import escape as html_escape
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import plotly.graph_objects as go
 
 from defences import DefenceSite
 from geo import (
+    EARTH_RADIUS_KM,
     Position,
     circle_path,
     elevation_angle_deg,
@@ -164,6 +166,29 @@ def _route_traces(plan) -> list[go.Scattergeo]:
     ]
 
 
+# How far out toward the viewport edge the further principal is allowed to sit.
+# 1.0 would put it exactly on the edge; this leaves a margin for its label.
+FIT_MARGIN = 0.78
+
+
+def fit_scale_limit(hostile: Position, friendly: Position) -> float:
+    """Largest projection.scale that still shows both principals.
+
+    An orthographic projection puts a point at angular distance α from the
+    camera centre at a screen radius of R·sin(α), where R is half the globe's
+    rendered size. The camera sits on the midpoint, so each principal is α = θ/2
+    away for a central angle θ — and keeping both inside the viewport means
+
+        scale · (min(w, h) / 2) · sin(θ/2)  ≤  margin · min(w, h) / 2
+
+    which reduces to scale ≤ margin / sin(θ/2), independent of window size.
+    Using min(w, h) is the conservative choice: the on-screen bearing between
+    the two is unknown, so the shorter axis has to be assumed.
+    """
+    theta = great_circle_km(hostile, friendly) / EARTH_RADIUS_KM  # radians
+    return FIT_MARGIN / max(math.sin(theta / 2), 1e-9)
+
+
 def _ground_track_name(hostile: Position, friendly: Position) -> str:
     return f"Ground track · {great_circle_km(hostile, friendly):,.0f} km"
 
@@ -294,6 +319,9 @@ def build_globe(
             font=dict(color=TEXT_SECONDARY, size=12),
             bgcolor="rgba(0,0,0,0)",
         ),
+        # Read by FIT_SCRIPT in the browser, which is where the window's aspect
+        # ratio — the other half of the zoom calculation — is known.
+        meta=dict(fitMaxScale=fit_scale_limit(hostile, friendly)),
         paper_bgcolor=SURFACE,
         # Non-zero left/right so nothing sits flush against the window edge,
         # and enough top for the four-line title block.
@@ -400,8 +428,14 @@ FIT_SCRIPT = """
         var size = gd._fullLayout && gd._fullLayout._size;
         if (!size || !size.w || !size.h) { return; }
 
-        var scale = Math.max(1, FILL * size.w / size.h);
-        // Never below 1: that would shrink the globe rather than fill.
+        // Filling the width zooms in, which can push one of the principals off
+        // screen when they are far apart. layout.meta carries the largest scale
+        // that still shows both; it wins, and may pull below 1 (i.e. zoom out
+        // past the default fit) when they are nearly antipodal.
+        var meta = gd._fullLayout.meta || {};
+        var limit = meta.fitMaxScale || Infinity;
+        var scale = Math.min(Math.max(1, FILL * size.w / size.h), limit);
+
         if (applied !== null && Math.abs(scale - applied) < 0.01) { return; }
         applied = scale;
 
