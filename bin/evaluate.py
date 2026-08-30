@@ -1,6 +1,7 @@
+#!/usr/bin/env python3
 """Score a trained policy against baselines on held-out scenarios.
 
-    python3 evaluate.py --episodes 400
+    python3 bin/evaluate.py --episodes 400
 
 Reports mission outcome and, separately, whether the package actually behaves
 as a team — arrival tightness, survivors, and time spent stacked inside one
@@ -20,8 +21,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from env import MAX_TEAM, MissionEnv, Scenario, random_scenario
-from ppo import load_policy
+from hidden_eclipse.env import MAX_TEAM, MissionEnv, Scenario, random_scenario
+from hidden_eclipse.paths import DEFAULT_POLICY
+from hidden_eclipse.ppo import load_policy
 
 HELD_OUT_SEED_BASE = 1_000_000
 
@@ -86,7 +88,7 @@ def summarise(name: str, runs: list[dict]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--policy", type=Path, default=Path("policy.pt"))
+    parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
     parser.add_argument("--episodes", type=int, default=400)
     parser.add_argument(
         "--team-size", type=int, default=None, help="fix the package size (default: random)"

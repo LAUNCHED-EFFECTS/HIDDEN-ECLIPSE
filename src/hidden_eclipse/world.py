@@ -10,9 +10,9 @@ import random
 import re
 from dataclasses import dataclass, field
 
-from defences import DefenceSite, random_defences
-from env import Scenario
-from geo import Position, destination, initial_bearing_deg, random_position
+from .defences import DefenceSite, random_defences
+from .env import Scenario
+from .geo import Position, destination, initial_bearing_deg, random_position
 
 CALLSIGN_MAX = 24
 _CALLSIGN_ALLOWED = re.compile(r"[^A-Za-z0-9 '\-]")

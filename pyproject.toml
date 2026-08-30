@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hidden-eclipse"
+version = "0.1.0"
+description = "Mission-planning sandbox: great-circle geometry, air defences, and a PPO planner."
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.26,<2",
+    "plotly>=6",
+    "torch>=2.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

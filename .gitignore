@@ -1,4 +1,12 @@
 .idea
 __pycache__/
 *.pyc
-hidden_eclipse/
+
+# In-repo virtual environment.
+/hidden-eclipse/
+
+# Packaging and test caches.
+*.egg-info/
+.pytest_cache/
+build/
+dist/

@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from env import ACT_DIM, MAX_TEAM, OBS_DIM, VecEnv
+from .env import ACT_DIM, MAX_TEAM, OBS_DIM, VecEnv
 
 
 @dataclass

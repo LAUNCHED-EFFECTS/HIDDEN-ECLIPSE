@@ -1,7 +1,8 @@
+#!/usr/bin/env python3
 """Serve the globe with working mission-control buttons.
 
-    python3 serve.py                       # http://127.0.0.1:8000
-    python3 serve.py --port 9000 --seed 21
+    python3 bin/serve.py                   # http://127.0.0.1:8000
+    python3 bin/serve.py --port 9000 --seed 21
 
 The page itself is the same figure the CLI writes; the difference is that the
 buttons have somewhere to call. Planning runs the trained PyTorch policy in
@@ -19,8 +20,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from geo import Position, great_circle_km
-from globe import (
+from hidden_eclipse.geo import Position, great_circle_km
+from hidden_eclipse.globe import (
     build_globe,
     ground_track_update,
     marker_hovertemplate,
@@ -28,9 +29,10 @@ from globe import (
     route_traces_json,
     title_text,
 )
-from plan import plan_mission
-from ppo import load_policy
-from world import World, clean_callsign, generate_world
+from hidden_eclipse.paths import DEFAULT_POLICY
+from hidden_eclipse.plan import plan_mission
+from hidden_eclipse.ppo import load_policy
+from hidden_eclipse.world import World, clean_callsign, generate_world
 
 
 class MissionState:
@@ -173,7 +175,7 @@ class MissionState:
 
     def plan(self) -> dict:
         if self.model is None:
-            return {"error": f"no policy at {self.args.policy} — run train.py first"}
+            return {"error": f"no policy at {self.args.policy} — run bin/train.py first"}
 
         with self.lock:
             scenario = self.world.to_scenario()
@@ -268,7 +270,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--policy", type=Path, default=Path("policy.pt"))
+    parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
     parser.add_argument("--lat-range", type=float, nargs=2, default=(-90.0, 90.0))
     parser.add_argument("--lon-range", type=float, nargs=2, default=(-180.0, 180.0))
     parser.add_argument("--alt-range", type=float, nargs=2, default=(0.0, 15000.0))

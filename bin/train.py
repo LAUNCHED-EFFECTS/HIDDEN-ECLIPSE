@@ -1,8 +1,9 @@
+#!/usr/bin/env python3
 """Train the PPO mission planner.
 
-    python3 train.py                      # default 400k steps
-    python3 train.py --steps 100000       # shorter run
-    python3 train.py --output policy.pt
+    python3 bin/train.py                  # default 400k steps
+    python3 bin/train.py --steps 100000   # shorter run
+    python3 bin/train.py --output models/policy.pt
 """
 
 from __future__ import annotations
@@ -11,7 +12,8 @@ import argparse
 import time
 from pathlib import Path
 
-from ppo import PPOConfig, PPOTrainer, TrainStats
+from hidden_eclipse.paths import DEFAULT_POLICY
+from hidden_eclipse.ppo import PPOConfig, PPOTrainer, TrainStats
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument(
-        "--output", type=Path, default=Path("policy.pt"), help="checkpoint path"
+        "--output", type=Path, default=DEFAULT_POLICY, help="checkpoint path"
     )
     return parser.parse_args()
 

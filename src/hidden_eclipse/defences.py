@@ -10,7 +10,7 @@ import math
 import random
 from dataclasses import dataclass
 
-from geo import Position, destination, slant_range_km
+from .geo import Position, destination, slant_range_km
 
 
 @dataclass(frozen=True)

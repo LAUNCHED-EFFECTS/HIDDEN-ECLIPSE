@@ -1,8 +1,9 @@
+#!/usr/bin/env python3
 """Generate a random hostile (red) and friendly (blue) position and plot them.
 
-    python3 main.py                  # new random pair, opens the globe
-    python3 main.py --seed 1337      # reproducible pair
-    python3 main.py --no-open        # just write the HTML
+    python3 bin/globe.py                  # new random pair, opens the globe
+    python3 bin/globe.py --seed 1337      # reproducible pair
+    python3 bin/globe.py --no-open        # just write the HTML
 """
 
 from __future__ import annotations
@@ -12,16 +13,17 @@ import random
 import webbrowser
 from pathlib import Path
 
-from defences import engaging
-from geo import (
+from hidden_eclipse.defences import engaging
+from hidden_eclipse.geo import (
     elevation_angle_deg,
     great_circle_km,
     initial_bearing_deg,
     slant_range_km,
 )
-from globe import build_globe, write_globe
-from world import generate_world
-from plan import load_and_plan
+from hidden_eclipse.globe import build_globe, write_globe
+from hidden_eclipse.paths import DEFAULT_GLOBE, DEFAULT_POLICY
+from hidden_eclipse.world import generate_world
+from hidden_eclipse.plan import load_and_plan
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,8 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("globe.html"),
-        help="where to write the interactive globe (default: globe.html)",
+        default=DEFAULT_GLOBE,
+        help="where to write the interactive globe (default: demo/globe.html)",
     )
     parser.add_argument(
         "--lat-range",
@@ -104,8 +106,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--policy",
         type=Path,
-        default=Path("policy.pt"),
-        help="policy checkpoint used by --plan (default: policy.pt)",
+        default=DEFAULT_POLICY,
+        help="policy checkpoint used by --plan (default: models/policy.pt)",
     )
     parser.add_argument(
         "--no-open",
@@ -118,7 +120,7 @@ def parse_args() -> argparse.Namespace:
 def build_plan(args, world):
     """Route the package onto RED, and print the briefing."""
     if not args.policy.exists():
-        print(f"\n  no policy at {args.policy} — run `python3 train.py` first")
+        print(f"\n  no policy at {args.policy} — run `python3 bin/train.py` first")
         return None
 
     mission = load_and_plan(

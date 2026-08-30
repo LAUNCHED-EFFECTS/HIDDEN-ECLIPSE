@@ -38,8 +38,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from defences import DefenceSite, random_defences
-from geo import Position, destination, great_circle_km, initial_bearing_deg
+from .defences import DefenceSite, random_defences
+from .geo import Position, destination, great_circle_km, initial_bearing_deg
 
 # --- airframe and episode limits -------------------------------------------
 SPEED_KMH = 900.0

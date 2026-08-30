@@ -8,10 +8,10 @@ from pathlib import Path
 
 import torch
 
-from defences import DefenceSite
-from env import STEP_SECONDS, MissionEnv, Scenario
-from geo import Position, great_circle_km, initial_bearing_deg
-from ppo import ActorCritic, RunningNorm
+from .defences import DefenceSite
+from .env import STEP_SECONDS, MissionEnv, Scenario
+from .geo import Position, great_circle_km, initial_bearing_deg
+from .ppo import ActorCritic, RunningNorm
 
 
 @dataclass
@@ -194,7 +194,7 @@ def load_and_plan(
     seed: int = 0,
     labels: list[str] | None = None,
 ) -> PackagePlan:
-    from ppo import load_policy
+    from .ppo import load_policy
 
     model, norm = load_policy(policy_path)
     return plan_mission(scenario, model, norm, seed, labels)

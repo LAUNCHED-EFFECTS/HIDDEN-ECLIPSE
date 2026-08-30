@@ -8,8 +8,8 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 
-from defences import DefenceSite
-from geo import (
+from .defences import DefenceSite
+from .geo import (
     EARTH_RADIUS_KM,
     Position,
     circle_path,
@@ -1068,7 +1068,7 @@ def render_html(
     """Full-window HTML for the figure.
 
     `interactive` adds the mission-control buttons, which only work when the
-    page is served by serve.py — a static file has no endpoint to call.
+    page is served by bin/serve.py — a static file has no endpoint to call.
     """
     scripts = [HOVER_SCRIPT, FIT_SCRIPT]
     head = PAGE_STYLE
